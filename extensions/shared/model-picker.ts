@@ -255,8 +255,8 @@ export function buildModelPickerItems(
   }
 
   // Show models from active / configured providers, exactly matching Pi's native /model selector
-  const available = ctx.modelRegistry.getAvailable ? ctx.modelRegistry.getAvailable() : [];
-  const models = available.length > 0 ? available : (ctx.modelRegistry.getAll ? ctx.modelRegistry.getAll() : []);
+  // An empty result means no provider is configured; never offer unauthenticated models.
+  const models = ctx.modelRegistry.getAvailable ? ctx.modelRegistry.getAvailable() : [];
 
   for (const model of models) {
     const fullId = `${model.provider}/${model.id}`;

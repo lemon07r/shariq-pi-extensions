@@ -8,7 +8,7 @@ Task List is independent of the Goal extension. An ordinary request can use a li
 
 The tool guidance limits the list to three cases: the user asks for a plan or checklist, the request has several separate deliverables, or long multi-phase work benefits from visible progress. A single objective, such as fixing one bug or implementing one spec, goes ahead without a list even when it takes many reads, edits, and test runs. The extension never prompts the model to start a list.
 
-When a list exists, the model sends it with its first real action, updates it only when a task finishes, is blocked or cancelled, or the scope changes, and marks finished items before the final response.
+When a list exists, the model sends it with its first real action, updates it only when a task finishes, is blocked or cancelled, or the scope changes, and never spends a turn on the list alone. Writes are acknowledged with a one-line count rather than echoing the whole list back.
 
 ## Model tool
 

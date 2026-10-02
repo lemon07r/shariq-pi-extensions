@@ -74,9 +74,11 @@ Project configuration is ignored for untrusted projects. `maxConcurrent` is boun
 
 New children start without parent context. `fork_turns` can be `all` or a positive number of recent user turns; the fork keeps user messages and final assistant text and drops thinking, tool calls, and tool results.
 
-Every child has a persistent Pi session file. `resume_from` continues a finished or cancelled child with its transcript, tool state, and id, including after a parent reload or restart. A run interrupted by cancellation or reload is recorded as `cancelled`, not as a failure.
+Every child has a persistent Pi session file. `resume_from` continues a finished or cancelled child with its transcript, tool state, and id, including after a parent reload or restart. An archived child resumes with its stored profile, persona, capability, and worktree unless the call overrides them. A child still loaded in this session keeps its settings, so a resume call that passes different ones is rejected. A run interrupted by cancellation or reload is recorded as `cancelled`, not as a failure.
 
-Non-secret metadata is stored in the parent session and in `<agent-dir>/subagents/catalog.json`, so children started by another Pi process stay discoverable. Final snapshots are saved under `<agent-dir>/subagents/runs/<id>/snapshot.json`. Only live children appear in the Active work dock.
+A child running in another Pi process cannot be resumed, and its worktree cannot be changed, until that process finishes or exits; a crashed owner is detected and its child becomes resumable.
+
+Non-secret metadata is stored in the parent session and in `<agent-dir>/subagents/catalog.json`, so children started by another Pi process stay discoverable; catalog writes are locked across processes. Each child's transcript stays in its own Pi session file. Only live children appear in the Active work dock.
 
 ## Worktree isolation
 

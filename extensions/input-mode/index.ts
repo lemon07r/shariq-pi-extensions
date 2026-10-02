@@ -63,8 +63,14 @@ export function createInputModeExtension(options: InputModeExtensionOptions = {}
         return;
       }
       if (!selected) return;
+      // Save first so the live mode never differs from what restarts will load.
+      try {
+        saveInputMode(selected, options.configFile);
+      } catch (error) {
+        ctx.ui.notify(`Input mode unchanged (${mode}): could not save the setting: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return;
+      }
       mode = selected;
-      saveInputMode(mode, options.configFile);
       updateStatus();
       const explanation = mode === "interrupt"
         ? "new Enter input aborts the active run before it is delivered"
@@ -104,7 +110,9 @@ export function createInputModeExtension(options: InputModeExtensionOptions = {}
       }
       if (mode === "steer") return { action: "continue" };
       if (mode === "follow-up") {
-        pi.sendUserMessage(modelInput(event), { deliverAs: "followUp" });
+        // Input handlers run before template expansion, so resend with expansion
+        // as Pi would have applied it to the original input.
+        pi.sendUserMessage(modelInput(event), { deliverAs: "followUp", expandPromptTemplates: true });
         return { action: "handled" };
       }
 

@@ -62,8 +62,9 @@ function harness(sessionFile: string | null = "/tmp/pi-goal-test.jsonl") {
   };
   goalExtension(pi as never);
 
+  // Pi passes a fresh context object to every event handler.
   async function emit(name: string, event: any = {}) {
-    for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+    for (const handler of handlers.get(name) ?? []) await handler(event, { ...ctx });
   }
   function addAssistant(usage: { input: number; output: number }, stopReason = "stop", errorMessage?: string) {
     entries.push({
@@ -148,7 +149,7 @@ test("supports blocked goals, usage-limit stops, and replacing completed goals",
   await limited.emit("session_start", { reason: "startup" });
   await limited.tools.get("create_goal").execute("c1", { objective: "Rate-limited work" }, undefined, undefined, limited.ctx);
   limited.addAssistant({ input: 10, output: 1 }, "error", "429 usage limit exceeded");
-  await limited.emit("agent_settled");
+  await limited.emit("agent_before_settle", { outcome: "error" });
   assert.equal((await limited.tools.get("get_goal").execute("g1", {}, undefined, undefined, limited.ctx)).details.goal.status, "usage_limited");
   await limited.shutdown();
 
@@ -192,6 +193,63 @@ test("changing a blocked item's meaning resets the persistence gate", async () =
     h.tools.get("update_goal").execute("u1", { status: "blocked" }, undefined, undefined, h.ctx),
     /1\/3 goal turns/,
   );
+  await h.shutdown();
+});
+
+test("swapping in a new blocker cannot inherit the old blocker's count", async () => {
+  const h = harness();
+  await h.emit("session_start", { reason: "startup" });
+  await h.tools.get("create_goal").execute("c1", { objective: "Track one real blocker" }, undefined, undefined, h.ctx);
+  await h.tools.get("update_goal_progress").execute("p1", { items: [{ id: "a", title: "Blocker A", status: "blocked" }] }, undefined, undefined, h.ctx);
+  for (let turn = 0; turn < 3; turn++) {
+    await h.emit("agent_start");
+    await h.emit("tool_execution_start", { toolName: "read" });
+    await h.emit("agent_end", { messages: [] });
+  }
+  await h.emit("agent_start");
+  await h.tools.get("update_goal_progress").execute(
+    "p2",
+    { items: [{ id: "a", title: "Blocker A", status: "complete", evidence: "resolved" }, { id: "b", title: "Blocker B", status: "blocked" }] },
+    undefined,
+    undefined,
+    h.ctx,
+  );
+  await assert.rejects(
+    h.tools.get("update_goal").execute("u1", { status: "blocked" }, undefined, undefined, h.ctx),
+    /0\/3 goal turns/,
+  );
+  await h.shutdown();
+});
+
+test("tree navigation restores the destination branch's goal", async () => {
+  const h = harness();
+  await h.emit("session_start", { reason: "startup" });
+  await h.tools.get("create_goal").execute("c1", { objective: "Branch one goal" }, undefined, undefined, h.ctx);
+  const branchOne = [...h.entries];
+  await h.commands.get("goal").handler("clear", h.ctx);
+  assert.equal((await h.tools.get("get_goal").execute("g1", {}, undefined, undefined, h.ctx)).details.goal, null);
+  // Navigate back to the leaf before the goal was cleared.
+  const entriesBeforeNavigation = h.entries.length;
+  h.entries.splice(0, h.entries.length, ...branchOne);
+  await h.emit("session_tree", { newLeafId: branchOne.at(-1)?.id, oldLeafId: null });
+  assert.equal(h.entries.length, branchOne.length, "navigation must not write onto the new leaf");
+  assert.ok(entriesBeforeNavigation > branchOne.length);
+  assert.equal((await h.tools.get("get_goal").execute("g2", {}, undefined, undefined, h.ctx)).details.goal.objective, "Branch one goal");
+  await h.shutdown();
+});
+
+test("accepting the startup resume prompt clears suppression and the blocked count", async () => {
+  const h = harness();
+  await h.emit("session_start", { reason: "startup" });
+  await h.tools.get("create_goal").execute("c1", { objective: "Recover after restart" }, undefined, undefined, h.ctx);
+  h.addAssistant({ input: 10, output: 1 }, "error", "provider connection failed");
+  await h.emit("agent_before_settle", { outcome: "error" });
+  await h.shutdown();
+  await h.emit("session_start", { reason: "resume" });
+  const resumed = (await h.tools.get("get_goal").execute("g1", {}, undefined, undefined, h.ctx)).details.goal;
+  assert.equal(resumed.status, "active");
+  assert.equal(resumed.continuationSuppressed, null);
+  assert.equal(resumed.blockedTurnStreak, 0);
   await h.shutdown();
 });
 
@@ -294,6 +352,8 @@ test("tool-backed work continues automatically at the next safe idle boundary", 
   await h.emit("agent_start");
   await h.emit("tool_execution_start");
   await h.emit("agent_end", { messages: [] });
+  await h.emit("agent_before_settle", { outcome: "completed" });
+  await h.emit("agent_settled");
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(h.sent.length, sentBefore + 1);
   assert.equal((await h.tools.get("get_goal").execute("g1", {}, undefined, undefined, h.ctx)).details.goal.continuationSuppressed, null);
@@ -306,7 +366,7 @@ test("interruptions and ordinary run errors pause instead of bypassing the block
     await h.emit("session_start", { reason: "startup" });
     await h.tools.get("create_goal").execute("c1", { objective: "Recover safely" }, undefined, undefined, h.ctx);
     h.addAssistant({ input: 10, output: 1 }, "error", message);
-    await h.emit("agent_settled");
+    await h.emit("agent_before_settle", { outcome: "error" });
     const current = await h.tools.get("get_goal").execute("g1", {}, undefined, undefined, h.ctx);
     assert.equal(current.details.goal.status, "paused");
     assert.equal(current.details.goal.continuationSuppressed.reason, reason);

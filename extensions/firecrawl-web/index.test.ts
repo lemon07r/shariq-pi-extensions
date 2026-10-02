@@ -123,6 +123,63 @@ test("rejects oversized streaming responses before buffering beyond 25 MiB", asy
   assert.equal(cancelled, true);
 });
 
+test("a declared oversized response is cancelled, not left streaming", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>({ pull() {}, cancel() { cancelled = true; } });
+  await assert.rejects(
+    firecrawlRequest(
+      "search",
+      { query: "test", timeout: 5_000 },
+      { apiKey: "fc-private-test", apiUrl: "https://api.firecrawl.dev", source: "environment" },
+      undefined,
+      async () => new Response(body, { status: 200, headers: { "content-length": String(30 * 1024 * 1024) } }),
+    ),
+    /exceeded 25 MiB/,
+  );
+  assert.equal(cancelled, true);
+});
+
+test("retry delays release their abort listeners", async () => {
+  const controller = new AbortController();
+  let added = 0;
+  let removed = 0;
+  const signal = controller.signal;
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = ((...args: Parameters<typeof add>) => { if (args[0] === "abort") added++; return add(...args); }) as typeof add;
+  signal.removeEventListener = ((...args: Parameters<typeof remove>) => { if (args[0] === "abort") removed++; return remove(...args); }) as typeof remove;
+  let calls = 0;
+  await firecrawlRequest(
+    "search",
+    { query: "test", timeout: 5_000 },
+    { apiKey: "fc-private-test", apiUrl: "https://api.firecrawl.dev", source: "environment" },
+    signal,
+    async () => (++calls < 3
+      ? new Response("{}", { status: 503, headers: { "retry-after": "0" } })
+      : new Response(JSON.stringify({ success: true }), { status: 200 })),
+  );
+  assert.equal(calls, 3);
+  assert.equal(added, removed, "every delay listener is removed after it resolves");
+});
+
+test("local HTTP API URLs accept IPv4 and IPv6 loopback only", () => {
+  for (const apiUrl of ["http://localhost:3002", "http://127.0.0.1:3002", "http://[::1]:3002"]) {
+    assert.equal(resolveFirecrawlConfig({ env: { FIRECRAWL_API_KEY: "fc-test-secret", FIRECRAWL_API_URL: apiUrl }, home: "/tmp/does-not-exist", platform: "linux" }).apiUrl, apiUrl);
+  }
+  assert.throws(
+    () => resolveFirecrawlConfig({ env: { FIRECRAWL_API_KEY: "fc-test-secret", FIRECRAWL_API_URL: "http://10.0.0.5:3002" }, home: "/tmp/does-not-exist", platform: "linux" }),
+    /HTTPS/,
+  );
+});
+
+test("truncated output with its artifact footer stays within Pi's limits", async () => {
+  const markdown = Array.from({ length: 5_000 }, (_, index) => `line ${index} ${"x".repeat(40)}`).join("\n");
+  const text = await formatScrapeOutput({ data: { markdown, metadata: {} } }, "markdown");
+  assert.match(text, /Complete response saved to:/);
+  assert.ok(Buffer.byteLength(text) <= 50 * 1024, `${Buffer.byteLength(text)} bytes`);
+  assert.ok(text.split("\n").length <= 2_000, `${text.split("\n").length} lines`);
+});
+
 test("formats compact untrusted search and scrape output", async () => {
   const search = await formatSearchOutput({ creditsUsed: 2, data: { web: [{ title: "Example", url: "https://example.com", description: "Result" }] } });
   assert.match(search, /untrusted web content/);

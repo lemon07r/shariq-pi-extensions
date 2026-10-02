@@ -30,6 +30,9 @@ class BunPtyAdapter implements UniversalPty {
   private readonly dataListeners = new Set<(chunk: string) => void>();
   private readonly exitListeners = new Set<(event: { exitCode: number; signal?: number }) => void>();
   private exited = false;
+  // Chunks can split a multibyte character; a streaming decoder carries the
+  // partial bytes into the next chunk instead of emitting replacement characters.
+  private readonly decoder = new TextDecoder("utf-8");
 
   constructor(options: SpawnUniversalPtyOptions) {
     const cmd = [options.file, ...options.args];
@@ -40,14 +43,7 @@ class BunPtyAdapter implements UniversalPty {
         cols: options.cols,
         rows: options.rows,
         data: (_term: unknown, chunk: Uint8Array | string) => {
-          const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-          for (const listener of this.dataListeners) {
-            try {
-              listener(text);
-            } catch {
-              // Ignore listener errors
-            }
-          }
+          this.emitData(typeof chunk === "string" ? chunk : this.decoder.decode(chunk, { stream: true }));
         },
       },
     });
@@ -57,6 +53,7 @@ class BunPtyAdapter implements UniversalPty {
     void this.proc.exited.then((exitCode: number) => {
       if (this.exited) return;
       this.exited = true;
+      this.emitData(this.decoder.decode());
       const signal = this.proc.signalCode
         ? typeof this.proc.signalCode === "number"
           ? this.proc.signalCode
@@ -70,6 +67,17 @@ class BunPtyAdapter implements UniversalPty {
         }
       }
     });
+  }
+
+  private emitData(text: string) {
+    if (!text) return;
+    for (const listener of this.dataListeners) {
+      try {
+        listener(text);
+      } catch {
+        // Ignore listener errors
+      }
+    }
   }
 
   onData(listener: (chunk: string) => void) {
@@ -138,6 +146,15 @@ class NodePtyAdapter implements UniversalPty {
 
   resize(cols: number, rows: number): void {
     this.pty.resize(cols, rows);
+  }
+
+  // Flow control for spill backpressure: stop reading the PTY until the log drains.
+  pause(): void {
+    this.pty.pause();
+  }
+
+  resume(): void {
+    this.pty.resume();
   }
 
   kill(signal?: string): void {

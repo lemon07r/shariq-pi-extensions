@@ -365,10 +365,31 @@ export class TerminalManager {
         // node-pty still knows how to terminate its direct child.
       }
     }
+    if (entry.snapshot.status !== "running") return;
     try {
       entry.pty.kill(signal);
     } catch {
       // Exit may have won the race.
+    }
+  }
+
+  /** The PTY's process group can outlive its leader when descendants ignore hangup. */
+  private groupAlive(entry: Entry): boolean {
+    if (process.platform === "win32") return false;
+    try {
+      process.kill(-entry.snapshot.pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+
+  private async waitForStop(entry: Entry, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (entry.snapshot.status !== "running" && !this.groupAlive(entry)) return;
+      await Promise.race([entry.settled, wait(25)]);
+      if (entry.snapshot.status !== "running") await wait(25);
     }
   }
 
@@ -380,13 +401,15 @@ export class TerminalManager {
       return entry;
     });
     await Promise.all(entries.map(async (entry) => {
-      if (entry.snapshot.status !== "running") return;
-      entry.killRequested = true;
+      // Stop is complete only when the whole group is gone, not just the leader.
+      const running = entry.snapshot.status === "running";
+      if (!running && !this.groupAlive(entry)) return;
+      if (running) entry.killRequested = true;
       this.signal(entry, "SIGTERM");
-      await Promise.race([entry.settled, wait(TERM_GRACE_MS)]);
-      if (entry.snapshot.status !== "running") return;
+      await this.waitForStop(entry, TERM_GRACE_MS);
+      if (entry.snapshot.status !== "running" && !this.groupAlive(entry)) return;
       this.signal(entry, "SIGKILL");
-      await Promise.race([entry.settled, wait(KILL_GRACE_MS)]);
+      await this.waitForStop(entry, KILL_GRACE_MS);
       if (entry.snapshot.status === "running") {
         entry.snapshot.errorText ??= "Process exit was not observed after SIGKILL; output may be incomplete.";
         await this.finalize(entry, 137, 9);
@@ -471,8 +494,10 @@ export class TerminalManager {
     if (this.disposed) return;
     this.disposed = true;
     this.settledListener = undefined;
-    const running = this.list().filter((snapshot) => snapshot.status === "running").map((snapshot) => snapshot.id);
-    if (running.length > 0) await this.kill(running);
+    const live = [...this.entries.values()]
+      .filter((entry) => entry.snapshot.status === "running" || this.groupAlive(entry))
+      .map((entry) => entry.snapshot.id);
+    if (live.length > 0) await this.kill(live);
     this.listeners.clear();
     this.idListeners.clear();
     this.entries.clear();

@@ -79,16 +79,21 @@ function enumValue<T extends readonly string[]>(value: unknown, values: T): T[nu
   return typeof value === "string" && values.includes(value) ? (value as T[number]) : undefined;
 }
 
+// Emit only the fields a document actually sets, so a partial override keeps
+// the rest of the profile it layers over (including its capability).
 function parseProfile(value: unknown): AgentProfile | undefined {
   if (!isRecord(value)) return undefined;
-  return {
-    description: typeof value.description === "string" ? value.description : undefined,
-    instructions: typeof value.instructions === "string" ? value.instructions : undefined,
-    capability: enumValue(value.capability, CAPABILITY_MODES),
-    model: typeof value.model === "string" ? value.model : undefined,
-    thinking: enumValue(value.thinking, ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const),
-    isolation: enumValue(value.isolation, ISOLATION_MODES),
-  };
+  const profile: AgentProfile = {};
+  if (typeof value.description === "string") profile.description = value.description;
+  if (typeof value.instructions === "string") profile.instructions = value.instructions;
+  const capability = enumValue(value.capability, CAPABILITY_MODES);
+  if (capability) profile.capability = capability;
+  if (typeof value.model === "string") profile.model = value.model;
+  const thinking = enumValue(value.thinking, ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+  if (thinking) profile.thinking = thinking;
+  const isolation = enumValue(value.isolation, ISOLATION_MODES);
+  if (isolation) profile.isolation = isolation;
+  return profile;
 }
 
 function parsePersona(value: unknown): PersonaProfile | undefined {

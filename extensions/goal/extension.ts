@@ -41,6 +41,9 @@ export default function goalExtension(pi: ExtensionAPI) {
 	const accountedAssistantEntries = new Set<string>();
 	let runMadeToolCall = false;
 	let runActive = false;
+	// Pi creates a fresh context object for every event, so continuation timers
+	// are tied to this branch generation instead of context identity.
+	let branchGeneration = 0;
 
 	function nowSeconds(): number {
 		return Math.floor(Date.now() / 1000);
@@ -427,17 +430,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 		}
 
 		if (action === "resume") {
-			accountAssistantEntries(ctx);
-			const budgetReached = goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget;
-			updateGoal((current) => {
-				current.status = budgetReached ? "budget_limited" : "active";
-				current.activeStartedAt = !budgetReached && !ctx.isIdle() ? nowSeconds() : null;
-				current.continuationSuppressed = null;
-				current.blockedTurnStreak = 0;
-				current.blockedSignature = null;
-			}, ctx);
-			ctx.ui.notify(budgetReached ? "Goal remains limited by budget" : "Goal active", "info");
-			if (!budgetReached) sendGoalContext("continuation");
+			resumeGoal(ctx);
 			return;
 		}
 
@@ -607,10 +600,11 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 			goal.continuationSuppressed ||
 			ctx.hasPendingMessages()
 		) return;
+		const generation = branchGeneration;
 		continuationTimer = setTimeout(() => {
 			continuationTimer = undefined;
 			if (
-				ctx !== lastCtx ||
+				generation !== branchGeneration ||
 				!goal ||
 				goal.status !== "active" ||
 				goal.continuationSuppressed ||
@@ -620,6 +614,22 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 			sendGoalContext("continuation");
 		}, 100);
 		continuationTimer.unref?.();
+	}
+
+	/** One resume transition for the command, the dashboard, and the startup prompt. */
+	function resumeGoal(ctx: ExtensionContext) {
+		if (!goal) return;
+		accountAssistantEntries(ctx);
+		const budgetReached = goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget;
+		updateGoal((current) => {
+			current.status = budgetReached ? "budget_limited" : "active";
+			current.activeStartedAt = !budgetReached && !ctx.isIdle() ? nowSeconds() : null;
+			current.continuationSuppressed = null;
+			current.blockedTurnStreak = 0;
+			current.blockedSignature = null;
+		}, ctx);
+		if (ctx.hasUI) ctx.ui.notify(budgetReached ? "Goal remains limited by budget" : "Goal active", "info");
+		if (!budgetReached) sendGoalContext("continuation");
 	}
 
 	async function replaceExistingGoal(ctx: ExtensionContext, objective: string, tokenBudget: number | null): Promise<boolean> {
@@ -659,6 +669,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 
 	pi.on("session_start", async (event, ctx) => {
 		lastCtx = ctx;
+		branchGeneration++;
 		cancelContinuation();
 		syncToolVisibility(ctx);
 		restoreFromSession(ctx);
@@ -670,10 +681,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		if (event.reason !== "reload" && goal && ["paused", "blocked", "usage_limited"].includes(goal.status) && ctx.hasUI) {
 			const stoppedStatus = goal.status;
 			const resume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${goal.objective}\n\nResume goal now?`);
-			if (resume && goal?.status === stoppedStatus) {
-				updateGoal((current) => { current.status = "active"; current.activeStartedAt = null; }, ctx);
-				sendGoalContext("continuation");
-			}
+			if (resume && goal?.status === stoppedStatus) resumeGoal(ctx);
 			return;
 		}
 		if (goal?.status === "active") scheduleContinuation(ctx);
@@ -757,10 +765,26 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		scheduleContinuation(ctx);
 	});
 
-	pi.on("agent_settled", async (_event, ctx) => {
+	// /tree moves to another branch; its goal state, not this one's, applies now.
+	// The old branch was persisted at every change, and writing here would land
+	// on the new leaf, so restore without persisting.
+	pi.on("session_tree", async (_event, ctx) => {
+		lastCtx = ctx;
+		branchGeneration++;
+		cancelContinuation();
+		runMadeToolCall = false;
+		restoreFromSession(ctx);
+		if (accountAssistantEntries(ctx) > 0 && goal) persist();
+		if (maybeApplyBudgetLimit(ctx)) return;
+		updateStatus(ctx);
+	});
+
+	// agent_before_settle is Pi's last actionable boundary, after retries and
+	// recovery; agent_settled is notification-only.
+	pi.on("agent_before_settle", async (event, ctx) => {
 		lastCtx = ctx;
 		runActive = false;
-		if (!goal || goal.status !== "active") return;
+		if (!goal || goal.status !== "active" || event.outcome !== "error") return;
 		const lastAssistant = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" && entry.message.role === "assistant");
 		if (!lastAssistant || lastAssistant.type !== "message" || lastAssistant.message.role !== "assistant" || lastAssistant.message.stopReason !== "error") return;
 		const error = lastAssistant.message.errorMessage ?? "";
@@ -775,8 +799,14 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		pauseAfterRun("error", error ? `run error: ${error.slice(0, 240)}` : "run ended with an error", ctx);
 	});
 
+	pi.on("agent_settled", async (_event, ctx) => {
+		lastCtx = ctx;
+		runActive = false;
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
 		lastCtx = ctx;
+		branchGeneration++;
 		cancelContinuation();
 		runActive = false;
 		if (statusTimer) {
@@ -845,17 +875,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 						ctx.ui.notify("No goal is currently set.", "warning");
 						return;
 					}
-					accountAssistantEntries(ctx);
-					const budgetReached = goal.tokenBudget != null && goal.tokensUsed >= goal.tokenBudget;
-					updateGoal((current) => {
-						current.status = budgetReached ? "budget_limited" : "active";
-						current.activeStartedAt = !budgetReached && !ctx.isIdle() ? nowSeconds() : null;
-						current.continuationSuppressed = null;
-						current.blockedTurnStreak = 0;
-						current.blockedSignature = null;
-					}, ctx);
-					ctx.ui.notify(budgetReached ? "Goal remains limited by budget" : "Goal active", "info");
-					if (!budgetReached) sendGoalContext("continuation");
+					resumeGoal(ctx);
 					return;
 				case "edit": {
 					if (!goal) {
@@ -918,6 +938,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		promptSnippet: "Track an explicitly requested long-running goal.",
 		promptGuidelines: ["Create a goal only when the user or system instructions explicitly ask for one; an ordinary task is not a goal."],
 		exposure: "model-only",
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 		parameters: Type.Object({
 			objective: Type.String({ description: "Concrete objective to pursue." }),
 			token_budget: Type.Optional(Type.Integer({ minimum: 1, description: "Positive token budget; set only when explicitly requested." })),
@@ -948,6 +969,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		label: "Update Goal Progress",
 		description: "Create or update the active goal's checklist and evidence ledger for multi-step goals. Use stable item ids; omitted items are kept. Mark an item complete only with concrete evidence, and blocked only for a specific unresolved dependency. The checklist guides the work but does not prove the goal is complete.",
 		exposure: "model-only",
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		parameters: Type.Object({
 			items: Type.Array(
 				Type.Object({
@@ -995,7 +1017,8 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 					if (index >= 0) current.progress[index] = next;
 					else current.progress.push(next);
 				}
-				if (!current.progress.some((item) => item.status === "blocked")) {
+				// A different blocker starts a fresh count; only the same one carries over.
+				if (blockerSignature(current.progress) !== current.blockedSignature) {
 					current.blockedTurnStreak = 0;
 					current.blockedSignature = null;
 				}
@@ -1013,6 +1036,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		label: "Update Goal",
 		description: "Mark a goal complete only after every requirement is verified, or blocked only after the same blocker persists for three consecutive goal turns and progress requires user input/external change. Hard, slow, uncertain, or incomplete work is not blocked. Only the user/system controls pause and limits.",
 		exposure: "model-only",
+		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		parameters: Type.Object({
 			status: Type.String({ enum: ["complete", "blocked"], description: "complete: every requirement verified. blocked: same blocker for 3 turns and external/user change required." }),
 		}),
@@ -1032,9 +1056,9 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 					throw new Error("Mark the specific blocked checklist item with update_goal_progress before blocking the goal.");
 				}
 				const signature = blockerSignature(goal.progress);
-				const effectiveStreak = goal.blockedTurnStreak + (
-					runActive && goal.blockedSignature === signature ? 1 : 0
-				);
+				const effectiveStreak = goal.blockedSignature === signature
+					? goal.blockedTurnStreak + (runActive ? 1 : 0)
+					: 0;
 				if (effectiveStreak < 3) {
 					throw new Error(`The blocker has persisted for ${effectiveStreak}/3 goal turns.`);
 				}

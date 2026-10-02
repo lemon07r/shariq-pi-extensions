@@ -77,8 +77,10 @@ function cleanMultiline(text: string): string {
   return sanitizeTerminalText(text).trim();
 }
 
+// Compare labels the way they are displayed (whitespace collapsed), so two
+// labels that look identical on screen are rejected as duplicates.
 function normalizedChoiceKey(label: string): string {
-  return label.normalize("NFKC").toLocaleLowerCase("en-US");
+  return oneLine(label).normalize("NFKC").toLocaleLowerCase("en-US");
 }
 
 function normalizeQuestionInput(
@@ -124,6 +126,7 @@ function createEditorTheme(theme: Theme): EditorTheme {
 export class AskUserView implements Focusable {
   private selected = 0;
   private editing = false;
+  private questionOffset = 0;
   private cachedWidth?: number;
   private cachedLines?: string[];
   private _focused = false;
@@ -133,6 +136,7 @@ export class AskUserView implements Focusable {
   private readonly requestRender: () => void;
   private readonly finish: (selection: Selection | null) => void;
   private readonly editor: Editor;
+  private readonly maxRows: () => number;
 
   constructor(
     question: string,
@@ -141,6 +145,7 @@ export class AskUserView implements Focusable {
     requestRender: () => void,
     finish: (selection: Selection | null) => void,
     editor: Editor,
+    maxRows: () => number = () => Number.POSITIVE_INFINITY,
   ) {
     this.question = question;
     this.options = options;
@@ -148,6 +153,7 @@ export class AskUserView implements Focusable {
     this.requestRender = requestRender;
     this.finish = finish;
     this.editor = editor;
+    this.maxRows = maxRows;
     this.editor.onSubmit = (value) => {
       const answer = cleanMultiline(value).slice(0, MAX_ANSWER_LENGTH);
       if (!answer) {
@@ -189,6 +195,15 @@ export class AskUserView implements Focusable {
   }
 
   handleInput(data: string): void {
+    if (matchesKey(data, Key.ctrl("c"))) {
+      this.finish(null);
+      return;
+    }
+    if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)) {
+      this.questionOffset = Math.max(0, this.questionOffset + (matchesKey(data, Key.pageUp) ? -5 : 5));
+      this.refresh();
+      return;
+    }
     if (this.editing) {
       if (matchesKey(data, Key.escape)) {
         this.editing = false;
@@ -220,7 +235,7 @@ export class AskUserView implements Focusable {
       this.choose(this.selected);
       return;
     }
-    if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+    if (matchesKey(data, Key.escape)) {
       this.finish(null);
     }
   }
@@ -229,54 +244,61 @@ export class AskUserView implements Focusable {
     if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
     const safeWidth = Math.max(1, width);
     const inner = Math.max(1, safeWidth - 4);
-    const lines: string[] = [frameTop(this.theme, safeWidth, "Decision needed")];
+    const questionLines = wrapTextWithAnsi(this.theme.bold(cleanMultiline(this.question)), inner)
+      .map((line) => padLine(`  ${this.theme.fg("text", line)}`, safeWidth));
 
-    for (const line of wrapTextWithAnsi(this.theme.bold(cleanMultiline(this.question)), inner)) {
-      lines.push(padLine(`  ${this.theme.fg("text", line)}`, safeWidth));
-    }
-    lines.push(padLine("", safeWidth));
-
+    const rest: string[] = [padLine("", safeWidth)];
     this.options.forEach((option, index) => {
       const active = index === this.selected;
       const marker = option.custom ? "✎" : `${index + 1}.`;
       const prefix = active ? this.theme.fg("accent", "❯") : " ";
-      const label = `${prefix} ${marker} ${oneLine(option.label)}`;
-      lines.push(
-        padLine(
+      // Wrap long labels so options that differ only near the end stay distinguishable.
+      const labelLines = wrapTextWithAnsi(oneLine(option.label), Math.max(8, inner - 4));
+      labelLines.forEach((text, lineIndex) => {
+        const label = lineIndex === 0 ? `${prefix} ${marker} ${text}` : `${" ".repeat(marker.length + 3)}${text}`;
+        rest.push(padLine(
           active
             ? this.theme.bg("selectedBg", this.theme.fg("accent", label))
             : this.theme.fg(option.custom ? "muted" : "text", label),
           safeWidth,
-        ),
-      );
+        ));
+      });
       if (option.description) {
         for (const description of wrapTextWithAnsi(oneLine(option.description), Math.max(8, inner - 4))) {
-          lines.push(padLine(`      ${this.theme.fg("muted", description)}`, safeWidth));
+          rest.push(padLine(`      ${this.theme.fg("muted", description)}`, safeWidth));
         }
       }
     });
-
     if (this.editing) {
-      lines.push(padLine("", safeWidth));
-      lines.push(padLine(`  ${this.theme.fg("muted", "Your answer")}`, safeWidth));
+      rest.push(padLine("", safeWidth));
+      rest.push(padLine(`  ${this.theme.fg("muted", "Your answer")}`, safeWidth));
       for (const line of this.editor.render(Math.max(10, safeWidth - 4))) {
-        lines.push(padLine(`  ${line}`, safeWidth));
+        rest.push(padLine(`  ${line}`, safeWidth));
       }
     }
+    rest.push(padLine("", safeWidth));
 
-    lines.push(padLine("", safeWidth));
-    lines.push(
-      padLine(
-        `  ${this.theme.fg(
-          "dim",
-          this.editing
-            ? "enter submit · escape choices"
-            : `up/down or 1-${this.options.length} choose · enter confirm · escape dismiss`,
-        )}`,
-        safeWidth,
-      ),
-    );
-    lines.push(frameBottom(this.theme, safeWidth));
+    // Keep the choices, editor, and controls on screen; a long question scrolls.
+    const questionRoom = this.maxRows() - rest.length - 3;
+    let visibleQuestion = questionLines;
+    let scrollHint = "";
+    if (questionLines.length > questionRoom) {
+      const room = Math.max(1, questionRoom);
+      this.questionOffset = Math.min(this.questionOffset, Math.max(0, questionLines.length - room));
+      visibleQuestion = questionLines.slice(this.questionOffset, this.questionOffset + room);
+      scrollHint = `pgup/pgdn question ${this.questionOffset + 1}-${this.questionOffset + visibleQuestion.length}/${questionLines.length} · `;
+    }
+
+    const controls = this.editing
+      ? "enter submit · escape choices · ctrl+c dismiss"
+      : `up/down or 1-${this.options.length} choose · enter confirm · escape dismiss`;
+    const lines = [
+      frameTop(this.theme, safeWidth, "Decision needed"),
+      ...visibleQuestion,
+      ...rest,
+      padLine(`  ${this.theme.fg("dim", `${scrollHint}${controls}`)}`, safeWidth),
+      frameBottom(this.theme, safeWidth),
+    ];
     this.cachedWidth = width;
     this.cachedLines = lines.map((line) => truncateToWidth(line, safeWidth, ""));
     return this.cachedLines;
@@ -315,6 +337,8 @@ async function openQuestion(
         () => tui.requestRender(),
         complete,
         new Editor(tui, createEditorTheme(theme)),
+        // Matches the overlay's maxHeight (86%) minus its margin.
+        () => Math.max(8, Math.floor((tui.terminal.rows || 24) * 0.86) - 2),
       );
       return {
         get focused() {
@@ -407,9 +431,12 @@ export default function askUserExtension(pi: ExtensionAPI) {
         invalidate() {},
       };
     },
-    renderResult(result, _options, theme) {
+    renderResult(result, _options, theme, context) {
       const details = result.details as AskUserDetails | undefined;
-      const text = !details || details.cancelled
+      const errorText = result.content.find((item) => item.type === "text")?.text ?? "invalid question";
+      const text = context.isError
+        ? `${theme.fg("error", "● not asked")} ${theme.fg("muted", oneLine(errorText))}`
+        : !details || details.cancelled
         ? theme.fg("warning", "● dismissed")
         : `${theme.fg("success", "● answered")} ${theme.fg("accent", oneLine(details.answer ?? ""))}`;
       return { render: (width: number) => [truncateToWidth(text, width)], invalidate() {} };

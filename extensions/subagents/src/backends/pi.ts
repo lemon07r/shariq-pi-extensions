@@ -15,6 +15,7 @@ import type { AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import type {
   AgentSession,
   AgentSessionEvent,
+  ExtensionFactory,
   ModelRegistry,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -93,6 +94,30 @@ export function filterToolsForCapability(
     if (capability === "execute" && EXECUTE_CAPABILITY_TOOLS.has(name)) return true;
     return false;
   });
+}
+
+/**
+ * Keep a restrictive child inside its capability for its whole life. A child-only
+ * tool_call blocker refuses every unclassified tool, including tools registered
+ * after startup and nested codemode calls; the loadout filter keeps them out of
+ * the model's view. Tool definitions are never mutated because Pi shares them
+ * by reference with the parent session.
+ */
+export function capabilityGuardExtension(capability: SpawnTask["capability"]): ExtensionFactory {
+  return (pi) => {
+    if (capability === "all") return;
+    pi.on("tool_call", (event) => {
+      if (filterToolsForCapability([event.toolName], capability).length) return undefined;
+      return { block: true, reason: `Tool "${event.toolName}" is not permitted for a ${capability} subagent.` };
+    });
+  };
+}
+
+function restrictActiveTools(session: AgentSession, capability: SpawnTask["capability"]) {
+  if (capability === "all") return;
+  const active = session.getActiveToolNames();
+  const allowed = filterToolsForCapability(active, capability);
+  if (allowed.length !== active.length) session.setActiveToolsByName(allowed);
 }
 
 // --- Model + effort resolution -----------------------------------------------
@@ -226,9 +251,10 @@ function messageRole(msg: unknown): Message["role"] | undefined {
 
 function lastAssistantMessage(
   session: AgentSession,
+  fromIndex = 0,
 ): AssistantMessage | undefined {
   const messages = session.messages;
-  for (let i = messages.length - 1; i >= 0; i--) {
+  for (let i = messages.length - 1; i >= fromIndex; i--) {
     const msg = messages[i];
     if (messageRole(msg) === "assistant") return msg as AssistantMessage;
   }
@@ -236,9 +262,9 @@ function lastAssistantMessage(
 }
 
 /** Final assistant text output (last assistant message with text), v1 semantics. */
-function finalOutput(session: AgentSession): string {
+function finalOutput(session: AgentSession, fromIndex = 0): string {
   const messages = session.messages;
-  for (let i = messages.length - 1; i >= 0; i--) {
+  for (let i = messages.length - 1; i >= fromIndex; i--) {
     const msg = messages[i];
     if (messageRole(msg) !== "assistant") continue;
     const text = (msg as AssistantMessage).content
@@ -353,6 +379,7 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources({
           cwd: task.cwd,
           projectTrusted: task.parent.projectTrusted,
+          extensionFactories: [capabilityGuardExtension(task.capability)],
         });
         const sessionManager = task.resumeSessionFile
           ? SessionManager.open(task.resumeSessionFile, undefined, task.cwd)
@@ -382,9 +409,7 @@ const makePiSession = (
         // the scope finalizer that owns cleanup is only registered later.
         try {
           await session.bindExtensions({ mode: "print" });
-          session.setActiveToolsByName(
-            filterToolsForCapability(session.getActiveToolNames(), task.capability),
-          );
+          restrictActiveTools(session, task.capability);
         } catch (error) {
           await shutdownAndDisposeChildSession(session);
           throw error;
@@ -401,6 +426,8 @@ const makePiSession = (
       /** One terminal event per run: lifecycle, prompt-rejection, and abort
        * fallbacks can all race to settle; the first wins. */
       settled: false,
+      /** First message index of the current run; settlement reads only from here. */
+      runStartIndex: 0,
     };
 
     const events = yield* Queue.make<SubagentEvent, Cause.Done>();
@@ -408,7 +435,8 @@ const makePiSession = (
       Queue.offerUnsafe(events, event);
     };
 
-    const toolTimeout = createToolCallTimeoutGuard();
+    // ask_parent waits for a person, not for work, so it keeps only cancellation.
+    const toolTimeout = createToolCallTimeoutGuard(undefined, new Set(["ask_parent"]));
     toolTimeout.apply(session);
 
     const activeModel = (): Model<any> | undefined => {
@@ -460,8 +488,10 @@ const makePiSession = (
     const settle = () => {
       if (state.settled) return;
       state.settled = true;
-      const last = lastAssistantMessage(session);
-      const partialText = finalOutput(session) || undefined;
+      // Only this run's messages count; an earlier answer must never become
+      // the output of a later run that failed before responding.
+      const last = lastAssistantMessage(session, state.runStartIndex);
+      const partialText = finalOutput(session, state.runStartIndex) || undefined;
       if (last?.stopReason === "aborted") {
         emit({
           _tag: "RunSettled",
@@ -487,7 +517,7 @@ const makePiSession = (
       }
       emit({
         _tag: "RunSettled",
-        outcome: { _tag: "Completed", finalText: finalOutput(session) },
+        outcome: { _tag: "Completed", finalText: finalOutput(session, state.runStartIndex) },
       });
     };
 
@@ -496,6 +526,7 @@ const makePiSession = (
       switch (event.type) {
         case "agent_start":
           // Extensions may register tools between runs; guard new ones too.
+          restrictActiveTools(session, task.capability);
           toolTimeout.apply(session);
           state.settled = false;
           emit({ _tag: "RunStarted" });
@@ -598,6 +629,7 @@ const makePiSession = (
     const startRun = (text: string) => {
       state.runError = undefined;
       state.settled = false;
+      state.runStartIndex = session.messages.length;
       emit({ _tag: "RunStarted" });
       void session.prompt(text).catch((error) => {
         state.runError = boundedError(error);

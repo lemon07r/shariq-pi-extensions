@@ -36,7 +36,7 @@ Managed PTYs for servers, watchers, long builds, and interactive programs: up to
 
 ### [Web fetch](../extensions/web-fetch/README.md)
 
-`web_fetch` retrieves one known HTTP or HTTPS URL as Markdown, text, or HTML, with time and size limits and no Firecrawl credits.
+`web_fetch` retrieves one known HTTP or HTTPS URL as Markdown, text, or HTML, with time and size limits and no Firecrawl credits. Local and private network addresses are blocked unless `PI_WEB_FETCH_ALLOW_PRIVATE=1` is set.
 
 ## Interface
 

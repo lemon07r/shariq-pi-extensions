@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { TerminalDashboard } from "./src/ui.ts";
+import { TerminalDashboard, TerminalDetail } from "./src/ui.ts";
 
 const snapshot = {
   id: "term-1",
@@ -58,5 +58,37 @@ test("terminal dashboard renders bounded live PTY metadata and output", () => {
     assert.ok(lines.every((line) => visibleWidth(line) <= 120));
   } finally {
     dashboard.dispose();
+  }
+});
+
+test("terminal detail sends printable keys to the input and stops only on ctrl+x twice", () => {
+  const writes: string[] = [];
+  const kills: string[] = [];
+  const view = {
+    get: () => snapshot,
+    subscribeTo() { return () => {}; },
+    requestKill(id: string) { kills.push(id); },
+    requestWrite(_id: string, data: string) { writes.push(data); },
+    requestResize() {},
+  } as any;
+  const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text } as any;
+  const detail = new TerminalDetail(
+    { terminal: { rows: 28 }, requestRender() {} } as any,
+    theme,
+    { matches: () => false, getKeys: () => [] } as any,
+    view,
+    "term-1",
+    () => {},
+  );
+  try {
+    for (const key of "xxjkgG") detail.handleInput(key);
+    detail.handleInput("\r");
+    assert.deepEqual(writes, ["xxjkgG\r"]);
+    assert.deepEqual(kills, []);
+    detail.handleInput("\x18");
+    detail.handleInput("\x18");
+    assert.deepEqual(kills, ["term-1"]);
+  } finally {
+    detail.dispose();
   }
 });

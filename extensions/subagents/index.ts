@@ -28,7 +28,7 @@ import { clearActivitySource, setActivitySource } from "../shared/activity-dock.
 import { settlementDelivery } from "../shared/settlement-delivery.ts";
 import { toolCallCard, toolResultCard } from "../shared/tool-card.ts";
 import { resolveStandaloneChildProjectTrust } from "../shared/child-session.ts";
-import { oneLine } from "../shared/tui-dashboard.ts";
+import { oneLine, sanitizeTerminalText } from "../shared/tui-dashboard.ts";
 import {
   formatElapsed,
   latestText,
@@ -96,7 +96,9 @@ import {
 } from "./src/coordinator.ts";
 import {
   allocateSubagentId,
+  currentOwner,
   loadSubagentCatalog,
+  ownedByAnotherProcess,
   upsertSubagentCatalog,
   type ArchivedSubagent,
 } from "./src/catalog.ts";
@@ -325,10 +327,20 @@ export default function (pi: ExtensionAPI) {
       isolation: snap.meta.isolation,
       worktree: snap.meta.worktree,
       updatedAt: Date.now(),
+      ...(snap.status === "running" ? currentOwner() : {}),
     };
     archived.set(record.id, record);
     upsertSubagentCatalog(record);
     pi.appendEntry(SUBAGENT_RECORD_TYPE, record);
+  };
+
+  /** The freshest record across processes, so ownership checks see other Pi sessions. */
+  const latestRecord = (id: string) => {
+    const shared = loadSubagentCatalog().get(id);
+    const local = archived.get(id);
+    if (!shared) return local;
+    if (!local) return shared;
+    return shared.updatedAt >= local.updatedAt ? shared : local;
   };
 
   interface SpawnOptions {
@@ -361,35 +373,61 @@ export default function (pi: ExtensionAPI) {
     options: SpawnOptions,
   ): Promise<PreparedSpawn> => {
     const config = loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted());
-    const profile = resolveProfile(config, {
-      agentType: options.agentType,
-      persona: options.persona,
-      capability: options.readonly ? "read-only" : options.capability,
-      model: options.model,
-      thinking: options.thinking,
-      isolation: options.isolation,
-    });
     const liveSource = options.resumeFrom ? manager.view.get(options.resumeFrom) : undefined;
-    const archivedSource = options.resumeFrom ? archived.get(options.resumeFrom) : undefined;
-    const title =
-      options.taskName?.trim().slice(0, 160) ||
-      liveSource?.title ||
-      archivedSource?.title ||
-      profile.agentType;
     if (liveSource?.status === "running") {
       throw new Error(`Cannot resume running subagent "${options.resumeFrom}"; use send_message instead.`);
     }
     if (liveSource) {
+      // A live session keeps the policy it was created with; silently accepting a
+      // different one would misreport what the child can do.
+      const overrides = [
+        options.agentType !== undefined && "agent_type",
+        options.persona !== undefined && "persona",
+        (options.capability !== undefined || options.readonly) && "capability",
+        options.isolation !== undefined && "isolation",
+        options.model !== undefined && "model",
+        options.thinking !== undefined && "thinking",
+        options.cwd !== undefined && "cwd",
+        options.forkTurns !== undefined && "fork_turns",
+      ].filter(Boolean);
+      if (overrides.length) {
+        throw new Error(
+          `Subagent "${liveSource.id}" is still loaded and keeps its existing settings; omit ${overrides.join(", ")} or close it first.`,
+        );
+      }
+      const liveProfile = resolveProfile(config, {
+        agentType: liveSource.meta.agentType,
+        persona: liveSource.meta.persona,
+      });
       await runTool(
         getRuntime(),
-        manager.send(liveSource.id, buildTaskPrompt(options.message, profile.instructions, profile.persona)),
+        manager.send(liveSource.id, buildTaskPrompt(options.message, liveProfile.instructions, liveProfile.persona)),
       );
       return { resumed: manager.view.get(liveSource.id)!, cleanup: async () => {} };
+    }
+    const archivedSource = options.resumeFrom ? latestRecord(options.resumeFrom) : undefined;
+    if (ownedByAnotherProcess(archivedSource)) {
+      throw new Error(`Subagent "${options.resumeFrom}" is running in another Pi session; resume it there or wait until it finishes.`);
     }
     const resumeSessionFile = archivedSource?.sessionFile;
     if (options.resumeFrom && (!resumeSessionFile || !fs.existsSync(resumeSessionFile))) {
       throw new Error(`Unknown or unavailable resumable subagent "${options.resumeFrom}".`);
     }
+    // An archived child resumes with its stored policy unless explicitly overridden.
+    const profile = resolveProfile(config, {
+      agentType: options.agentType ?? archivedSource?.agentType,
+      persona: options.persona ?? archivedSource?.persona,
+      capability: options.readonly ? "read-only" : (options.capability ?? archivedSource?.capability),
+      model: options.model,
+      thinking: options.thinking,
+      isolation: options.isolation ?? (archivedSource ? (archivedSource.worktree ? "worktree" : "none") : undefined),
+    });
+    const title =
+      options.taskName?.trim().slice(0, 160) ||
+      archivedSource?.title ||
+      profile.agentType;
+    // Validate before allocating a worktree so a bad value cannot leak one.
+    const forkTurns = resumeSessionFile ? undefined : parseForkTurns(options.forkTurns);
 
     let cwd = path.resolve(ctx.cwd, options.cwd ?? ".");
     const resumedWorktree = archivedSource?.worktree;
@@ -425,12 +463,13 @@ export default function (pi: ExtensionAPI) {
         ).catch(() => undefined);
       }
     };
+    try {
     const preferredId = resumeSessionFile ? options.resumeFrom! : allocateSubagentId();
-    const inheritedMessages = resumeSessionFile
+    const inheritedMessages = forkTurns === undefined
       ? []
       : forkConversation(
           ctx.sessionManager.buildContextEntries().flatMap(sessionEntryToContextMessages),
-          parseForkTurns(options.forkTurns),
+          forkTurns,
         );
     return {
       cleanup,
@@ -466,6 +505,10 @@ export default function (pi: ExtensionAPI) {
         },
       },
     };
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
   };
 
   const spawnPiAgent = async (
@@ -1083,12 +1126,15 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const manager = await getManager();
       const snap = manager.view.get(params.id);
-      const record = archived.get(params.id);
+      const record = latestRecord(params.id);
       const worktree = snap?.meta.worktree ?? record?.worktree;
       if (!worktree) throw new Error(`Subagent "${params.id}" has no isolated worktree.`);
       const action: WorktreeAction = params.action ?? "patch";
       if (snap?.status === "running" && action !== "inspect") {
         throw new Error(`Subagent "${params.id}" is still running; wait or close it before ${action}.`);
+      }
+      if (!snap && ownedByAnotherProcess(record) && action !== "inspect") {
+        throw new Error(`Subagent "${params.id}" is running in another Pi session; ${action} it there or wait until it finishes.`);
       }
       const exec = (command: string, args: string[], execOptions?: Parameters<typeof pi.exec>[2]) =>
         pi.exec(command, args, execOptions);
@@ -1273,17 +1319,18 @@ export default function (pi: ExtensionAPI) {
       const icon = failed ? theme.fg("error", "x") : cancelled ? theme.fg("muted", "■") : theme.fg("success", "■");
       const header =
         `${icon} ` +
-        theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
+        theme.fg("accent", theme.bold(`subagent ${oneLine(details.id ?? "?")}`)) +
         theme.fg(
           "muted",
-          ` · ${details.title ?? ""} · ${failed ? "failed" : cancelled ? "cancelled" : "finished"}`,
+          ` · ${oneLine(details.title ?? "")} · ${failed ? "failed" : cancelled ? "cancelled" : "finished"}`,
         );
 
       const content =
         typeof message.content === "string" ? message.content : "";
       // Remove only the summary line. The following Error line (when present)
       // is part of the actual result and must remain visible.
-      const body = content.split("\n").slice(1).join("\n").trim();
+      // Child output is untrusted; strip terminal control sequences before display.
+      const body = sanitizeTerminalText(content.split("\n").slice(1).join("\n")).trim();
 
       if (expanded) {
         const md = new Markdown(`${body}`, 0, 0, getMarkdownTheme());
@@ -1319,11 +1366,11 @@ export default function (pi: ExtensionAPI) {
       const cancelled = data.status === "cancelled";
       const header =
         `${theme.fg(failed ? "error" : cancelled ? "muted" : "success", "■")} ` +
-        theme.fg("accent", theme.bold(`by the way · ${data.title}`)) +
-        theme.fg("muted", ` · ${failed ? "failed" : cancelled ? "cancelled" : "answered"} · ${data.id}`);
-      const body = [data.errorText ? `Error: ${data.errorText}` : "", data.answer]
+        theme.fg("accent", theme.bold(`by the way · ${oneLine(data.title)}`)) +
+        theme.fg("muted", ` · ${failed ? "failed" : cancelled ? "cancelled" : "answered"} · ${oneLine(data.id)}`);
+      const body = sanitizeTerminalText([data.errorText ? `Error: ${data.errorText}` : "", data.answer]
         .filter(Boolean)
-        .join("\n\n");
+        .join("\n\n"));
       if (expanded) {
         const markdown = new Markdown(body, 0, 0, getMarkdownTheme());
         const title = new Text(header, 0, 0);

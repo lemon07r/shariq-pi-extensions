@@ -12,7 +12,13 @@ interface Coordinator {
   flush(): void;
 }
 
-const coordinators = new WeakMap<SessionKey, Coordinator>();
+// Pi loads every extension entrypoint through its own module instance, so the
+// per-session coordinators live on a process-wide registry. Otherwise each
+// extension would flush its own queue and start its own turn.
+const REGISTRY_KEY = Symbol.for("shariq-pi-extensions/settlement-delivery/v1");
+const coordinators: WeakMap<SessionKey, Coordinator> =
+  ((globalThis as Record<symbol, unknown>)[REGISTRY_KEY] as WeakMap<SessionKey, Coordinator> | undefined) ??
+  ((globalThis as Record<symbol, unknown>)[REGISTRY_KEY] = new WeakMap<SessionKey, Coordinator>()) as WeakMap<SessionKey, Coordinator>;
 
 function createCoordinator(pi: ExtensionAPI): Coordinator {
   const coordinator: Coordinator = {

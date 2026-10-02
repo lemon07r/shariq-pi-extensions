@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { uuidv7, type Api, type Context, type Model, type Usage, type AssistantMessage } from "@earendil-works/pi-ai";
@@ -244,6 +245,7 @@ async function runGit(cwd: string, args: string[], signal?: AbortSignal): Promis
 async function readUntrackedPreviews(
   root: string,
   files: DirtyFileState[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const sections: string[] = [];
   let remaining = DIRTY_PATCH_CHARS;
@@ -252,27 +254,44 @@ async function readUntrackedPreviews(
     const absolute = path.resolve(root, file.path);
     const relative = path.relative(root, absolute);
     if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      const metadata = await stat(absolute);
+      signal?.throwIfAborted();
+      // Symlinks can point outside the repository (credentials, home files);
+      // never follow them. O_NOFOLLOW closes the race between lstat and open.
+      const metadata = await lstat(absolute);
       if (!metadata.isFile()) continue;
-      const buffer = await readFile(absolute);
+      handle = await open(absolute, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      const size = (await handle.stat()).size;
       const header = `\ndiff --git a/${file.path} b/${file.path}\n--- /dev/null\n+++ b/${file.path}\n`;
-      if (buffer.includes(0)) {
-        const binary = `${header}[binary untracked file: ${buffer.length} bytes]\n`;
+      const limit = Math.min(UNTRACKED_FILE_CHARS, remaining);
+      // Read only a bounded head and tail; large datasets never enter memory.
+      const half = Math.floor(limit / 2);
+      const readRange = async (position: number, length: number) => {
+        const buffer = Buffer.alloc(Math.max(0, length));
+        const { bytesRead } = await handle!.read(buffer, 0, buffer.length, position);
+        return buffer.subarray(0, bytesRead);
+      };
+      const whole = size <= limit;
+      const head = await readRange(0, whole ? size : half);
+      const tail = whole ? Buffer.alloc(0) : await readRange(Math.max(half, size - half), half);
+      if (head.includes(0) || tail.includes(0)) {
+        const binary = `${header}[binary untracked file: ${size} bytes]\n`;
         sections.push(binary.slice(0, remaining));
         remaining -= binary.length;
         continue;
       }
-      const text = buffer.toString("utf8");
-      const limit = Math.min(UNTRACKED_FILE_CHARS, remaining);
-      const preview = text.length <= limit
-        ? text
-        : `${text.slice(0, Math.floor(limit / 2))}\n[... untracked content truncated ...]\n${text.slice(-Math.floor(limit / 2))}`;
+      const preview = whole
+        ? head.toString("utf8")
+        : `${head.toString("utf8")}\n[... untracked content truncated ...]\n${tail.toString("utf8")}`;
       const section = `${header}${preview}\n`;
       sections.push(section.slice(0, remaining));
       remaining -= section.length;
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error;
       // A file can disappear between status and snapshot; its status remains useful.
+    } finally {
+      await handle?.close();
     }
   }
   return sections.join("");
@@ -301,7 +320,7 @@ export async function getGitEngineeringState(cwd?: string, signal?: AbortSignal)
     const [staged, unstaged, untracked] = await Promise.all([
       runGit(root, stagedArgs, signal),
       runGit(root, unstagedArgs, signal),
-      readUntrackedPreviews(root, codeFiles),
+      readUntrackedPreviews(root, codeFiles, signal),
     ]);
     const sections = [
       staged ? `## Staged changes\n${staged}` : "",
@@ -418,12 +437,7 @@ export function extractRepairableSummary(response: AssistantMessage): string | u
 export function computeCompactionTokenCeiling(
   model: Model<Api>,
   config: SmartCompactionConfig,
-  reserveTokens = 16384,
-): number {
-  if (reserveTokens <= 0) {
-    throw new Error("Reserve tokens budget must be positive.");
-  }
-  const modelMax = model.maxTokens > 0 ? model.maxTokens : 32768;
+): number {  const modelMax = model.maxTokens > 0 ? model.maxTokens : 32768;
 
   // If the user explicitly configured a maxSummaryTokens override, respect it within model's capacity
   if (typeof config.maxSummaryTokens === "number" && config.maxSummaryTokens > 0) {
@@ -587,15 +601,13 @@ export async function runSmartCompaction(
   let activeModel = primaryModel;
   let activeIsInherited = primaryIsInherited;
 
-  const reserveTokens = preparation.settings?.reserveTokens ?? 16384;
-
   for (const plan of plans) {
     signal?.throwIfAborted();
     attemptCount++;
     activeModel = plan.model;
     activeIsInherited = plan.isInherited;
 
-    const tokenCeiling = computeCompactionTokenCeiling(plan.model, config, reserveTokens);
+    const tokenCeiling = computeCompactionTokenCeiling(plan.model, config);
 
     const timeoutController = new AbortController();
     const timeoutTimer = setTimeout(() => {
@@ -639,6 +651,12 @@ export async function runSmartCompaction(
       break; // Success!
     } catch (err) {
       if (signal?.aborted) throw err;
+      // A stage timeout aborts the request too; that is retryable on the next
+      // stage, not a user cancellation.
+      if (timeoutController.signal.aborted) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        continue;
+      }
       if (isFatalCompactionError(err)) {
         throw err instanceof Error ? err : new Error(String(err));
       }

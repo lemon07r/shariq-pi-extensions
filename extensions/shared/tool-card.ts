@@ -1,4 +1,4 @@
-import { oneLine, stateLabel } from "./tui-dashboard.ts";
+import { oneLine, sanitizeTerminalText, stateLabel } from "./tui-dashboard.ts";
 
 export type ToolCardState = "active" | "success" | "warning" | "error" | "muted";
 
@@ -30,10 +30,12 @@ export function toolResultCard(
 ) {
   const header = `${stateLabel(theme as never, state, label)} ${theme.fg("muted", oneLine(summary))}`;
   if (!expanded) return `${header}\n${theme.fg("dim", "ctrl+o to expand")}`;
-  const body = result.content
+  // Result text can come from repositories, web pages, or child agents; strip
+  // terminal control sequences before it reaches the display.
+  const body = sanitizeTerminalText(result.content
     ?.filter((item) => item.type === "text" && item.text)
     .map((item) => item.text ?? "")
-    .join("\n")
+    .join("\n") ?? "")
     .trim();
   return body ? `${header}\n${theme.fg("toolOutput", body)}` : header;
 }

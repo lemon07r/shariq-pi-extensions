@@ -227,7 +227,7 @@ export function extractProtectedFacts(messages: AgentMessage[], previousSummary?
 
   const identifierPatterns = [
     /\b[0-9a-f]{40}\b/gi,
-    /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi,
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
     /https?:\/\/[^\s<>"')\]]+/gi,
     /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
   ];

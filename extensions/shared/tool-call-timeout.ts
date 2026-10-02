@@ -38,6 +38,10 @@ export async function runWithToolCallTimeout<T>(
   const executionSignal = signal
     ? AbortSignal.any([signal, timeoutController.signal])
     : timeoutController.signal;
+  // Never start a tool whose call was already cancelled.
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new Error(`Tool call "${toolName}" was aborted.`);
+  }
   const timeoutError = new ToolCallTimeoutError(toolName, timeoutMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -76,9 +80,12 @@ export async function runWithToolCallTimeout<T>(
 /**
  * Wrap every currently registered child tool with an independent execution
  * timeout. Calling apply() again is safe and picks up tools registered later.
+ * Tools named in `exempt` wait for a person rather than execute, so they keep
+ * only cancellation.
  */
 export function createToolCallTimeoutGuard(
   timeoutMs = CHILD_TOOL_CALL_TIMEOUT_MS,
+  exempt: ReadonlySet<string> = new Set(),
 ) {
   const wrapped = new WeakSet<ToolDefinition>();
 
@@ -97,7 +104,7 @@ export function createToolCallTimeoutGuard(
     apply(session: ToolRegistry) {
       for (const { name } of session.getAllTools()) {
         const definition = session.getToolDefinition(name);
-        if (definition) wrap(definition);
+        if (definition && !exempt.has(name)) wrap(definition);
       }
     },
   };

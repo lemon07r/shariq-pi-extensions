@@ -24,7 +24,6 @@ import {
 } from "effect";
 import type { SubagentBackend, SubagentSession } from "./backend.ts";
 import { BackendRegistry } from "./backend.ts";
-import { loadPersistedSnapshots } from "./storage.ts";
 import type {
   BackendName,
   LiveToolState,
@@ -199,15 +198,6 @@ const makeManager = Effect.gen(function* () {
     }
   };
   replenishIdPool();
-
-  const persistedSnapshots = new Map<string, SubagentSnapshot>();
-  try {
-    for (const snap of loadPersistedSnapshots()) {
-      persistedSnapshots.set(snap.id, snap);
-    }
-  } catch {
-    // Best-effort load
-  }
 
   const allocateId = (preferredId?: string): string => {
     if (preferredId && !entries.has(preferredId)) {
@@ -768,16 +758,9 @@ const makeManager = Effect.gen(function* () {
   });
 
   const view: SubagentReadModel = {
-    list: () => {
-      const active = [...entries.values()].map((entry) => entry.snapshot);
-      const activeIds = new Set(active.map((s) => s.id));
-      const historical = [...persistedSnapshots.values()].filter(
-        (s) => !activeIds.has(s.id),
-      );
-      return [...active, ...historical];
-    },
+    list: () => [...entries.values()].map((entry) => entry.snapshot),
     active: () => [...entries.values()].map((entry) => entry.snapshot),
-    get: (id) => entries.get(id)?.snapshot ?? persistedSnapshots.get(id),
+    get: (id) => entries.get(id)?.snapshot,
     size: () => entries.size,
     subscribe: (listener) => {
       listeners.add(listener);
@@ -837,16 +820,8 @@ const makeManager = Effect.gen(function* () {
     waitFor,
     cancel,
     send,
-    get: (id) =>
-      Effect.sync(() => entries.get(id)?.snapshot ?? persistedSnapshots.get(id)),
-    list: Effect.sync(() => {
-      const active = [...entries.values()].map((e) => e.snapshot);
-      const activeIds = new Set(active.map((s) => s.id));
-      const historical = [...persistedSnapshots.values()].filter(
-        (s) => !activeIds.has(s.id),
-      );
-      return [...active, ...historical];
-    }),
+    get: (id) => Effect.sync(() => entries.get(id)?.snapshot),
+    list: Effect.sync(() => [...entries.values()].map((e) => e.snapshot)),
     disposeAll,
     view,
   });

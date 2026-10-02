@@ -4,10 +4,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTaskPrompt, forkConversation, parseForkTurns } from "./src/context.ts";
-import { loadConfigDocument, resolveProfile, saveConfigDocument, type SubagentConfig } from "./src/config.ts";
+import { loadConfigDocument, loadSubagentConfig, resolveProfile, saveConfigDocument, type SubagentConfig } from "./src/config.ts";
 import { SUBAGENT_SPAWN_PROMPT_GUIDELINES, WORKTREE_ISOLATION_DESCRIPTION } from "./src/prompt.ts";
 import { allocateSubagentId } from "./src/catalog.ts";
-import { filterToolsForCapability } from "./src/backends/pi.ts";
+import { capabilityGuardExtension, filterToolsForCapability } from "./src/backends/pi.ts";
 
 const usage = {
   input: 0,
@@ -93,6 +93,27 @@ test("configuration editor validates and saves trusted project documents", () =>
   }
 });
 
+test("partial profile overrides keep the built-in capability and instructions", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagent-config-test-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagent-agent-dir-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    saveConfigDocument("global", cwd, JSON.stringify({ profiles: { explore: { model: "global/model" } } }));
+    saveConfigDocument("project", cwd, JSON.stringify({ profiles: { explore: { description: "Project explorer" } } }));
+    const explore = loadSubagentConfig(cwd, true).profiles.explore;
+    assert.equal(explore?.capability, "execute");
+    assert.equal(explore?.model, "global/model");
+    assert.equal(explore?.description, "Project explorer");
+    assert.match(explore?.instructions ?? "", /Do not modify files/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("restrictive capabilities fail closed for extension execution tools", () => {
   const inventory = [
     "read",
@@ -142,4 +163,20 @@ test("profile resolution applies explicit overrides before profile and persona d
     thinking: undefined,
     isolation: "worktree",
   });
+});
+
+test("restrictive children block unclassified tools at call time, including late registrations", () => {
+  const handlers = new Map<string, (event: any) => any>();
+  capabilityGuardExtension("read-only")({ on: (name: string, handler: any) => handlers.set(name, handler) } as never);
+  const guard = handlers.get("tool_call")!;
+  assert.equal(guard({ toolName: "read" }), undefined);
+  assert.deepEqual(guard({ toolName: "late_extension_tool" }), {
+    block: true,
+    reason: 'Tool "late_extension_tool" is not permitted for a read-only subagent.',
+  });
+  assert.equal(guard({ toolName: "bash" }).block, true);
+
+  const unrestricted = new Map<string, unknown>();
+  capabilityGuardExtension("all")({ on: (name: string, handler: unknown) => unrestricted.set(name, handler) } as never);
+  assert.equal(unrestricted.size, 0);
 });

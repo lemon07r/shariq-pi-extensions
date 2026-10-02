@@ -21,19 +21,19 @@ When a model-started terminal exits, its status and a bounded output tail are de
 - live counts and status;
 - terminal list with a selected-session inspector;
 - live output, elapsed time, dimensions, command, cwd, and full-log size;
-- real PTY input;
+- real PTY input: every printable key goes to the process;
 - Ctrl+C delivery to the PTY;
-- scrolling and top/bottom navigation;
-- two-press process-stop guard.
+- PgUp/PgDn scrolling;
+- a two-press Ctrl+X process-stop guard in the detail view.
 
 ## Lifecycle and safety
 
 - Maximum eight concurrent terminals and 32 tracked entries.
 - Newest 2 MiB retained in memory per terminal.
 - Raw output spills to a mode-`0600` file under a mode-`0700` temporary session directory, capped at 64 MiB per terminal.
-- Spill backpressure pauses and resumes the PTY; reaching the cap stops log growth while retaining the newest live-output tail.
+- Under Node, spill backpressure pauses and resumes the PTY. Bun's terminal API has no pause, so the 64 MiB cap is the only bound there. Reaching the cap stops log growth while retaining the newest live-output tail.
 - Pruning an old settled terminal deletes its spill file immediately; session shutdown removes the complete temporary directory.
 - Output is sanitized before TUI or model rendering.
 - Processes run in their own PTY process group and are stopped on session shutdown, replacement, or reload.
-- Shutdown and stop operations are bounded and escalate from SIGTERM to SIGKILL.
+- Shutdown and stop operations are bounded and escalate from SIGTERM to SIGKILL. A stop finishes only when the whole process group is gone, including descendants that outlive the shell and ignore hangup.
 - Completion delivery is keyed by terminal id, so each terminal produces at most one result message.

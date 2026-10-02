@@ -88,3 +88,14 @@ test("buildModelPickerItems prioritizes active/configured models from getAvailab
   assert.equal(items[0].id, "gemini-2.5-flash");
   assert.equal(items[0].provider, "google");
 });
+
+test("buildModelPickerItems never falls back to unconfigured models", () => {
+  const ctx = {
+    modelRegistry: {
+      getAvailable() { return []; },
+      getAll() { return [{ provider: "unconfigured-provider", id: "some-model", name: "Some Model" }]; },
+    },
+  };
+  const items = buildModelPickerItems(ctx as never, { extraChoices: [{ id: "inherit", label: "inherit" }] });
+  assert.deepEqual(items.map((item) => item.id), ["inherit"]);
+});

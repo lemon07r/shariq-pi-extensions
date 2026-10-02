@@ -64,7 +64,7 @@ function readCliCredentials(home: string, platform: NodeJS.Platform): { apiKey?:
 function normalizeApiUrl(value: string | undefined): string {
   const input = value?.trim() || DEFAULT_API_URL;
   const url = new URL(input);
-  const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !localHttp) throw new Error("Firecrawl API URL must use HTTPS (or localhost HTTP).");
   url.pathname = url.pathname.replace(/\/+$/, "");
   return url.toString().replace(/\/$/, "");

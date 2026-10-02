@@ -432,7 +432,7 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
         return;
       }
       if (trimmed.startsWith("stop ")) {
-        const ids = [...new Set(trimmed.slice("stop ".length).split(/[\\s,]+/).filter(Boolean))];
+        const ids = [...new Set(trimmed.slice("stop ".length).split(/[\s,]+/).filter(Boolean))];
         if (ids.length === 0) {
           ctx.ui.notify("Usage: /term stop <id> [id…]", "error");
           return;

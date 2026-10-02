@@ -16,7 +16,7 @@ Delegate only when the user explicitly asks for it. Task size or convenience is 
 
 - `spawn_agent` starts one background child; `task` starts a batch of independent children and reserves capacity for all of them or none. Both return as soon as the children start.
 - `send_message` steers a running child or starts the next turn of an idle one. Use it instead of spawning a duplicate.
-- `resume_from` on `spawn_agent` continues a finished or cancelled child with its full transcript, including children from earlier Pi sessions.
+- `resume_from` on `spawn_agent` continues a finished or cancelled child with its full transcript, including children from earlier Pi sessions. It keeps the child's stored profile, capability, and worktree unless you override them; a child that is still loaded rejects overrides.
 - `check_agent` shows one child's current activity. `wait_agent` collects results that are already available and lists the rest as pending; it never blocks.
 - `close_agent` stops exact running children and keeps their partial transcripts.
 - Use `list_agents` or `list_agent_profiles` only when you need live ids, profiles, personas, or defaults for an immediate decision.

@@ -102,6 +102,26 @@ test("stops the PTY process group and settles exactly once as killed", async () 
   }
 });
 
+test("stop also ends descendants that outlive the leader and ignore TERM/HUP", async () => {
+  const manager = new TerminalManager();
+  try {
+    const terminal = manager.start({
+      title: "stubborn",
+      command: `sh -c 'trap "" TERM HUP; echo grandchild:$$; while true; do sleep 1; done' & sleep 0.3; exit 0`,
+      cwd: process.cwd(),
+    });
+    const settled = await waitForSettlement(manager, terminal.id);
+    const grandchild = Number(settled.text.match(/grandchild:(\d+)/)?.[1]);
+    assert.ok(Number.isSafeInteger(grandchild));
+    assert.doesNotThrow(() => process.kill(grandchild, 0), "descendant should outlive the leader");
+    await manager.kill([terminal.id]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.throws(() => process.kill(grandchild, 0));
+  } finally {
+    await manager.dispose();
+  }
+});
+
 test("pruning settled terminals deletes their private logs", async () => {
   const manager = new TerminalManager();
   let oldestLog: string | undefined;

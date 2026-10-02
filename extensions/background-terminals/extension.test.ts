@@ -217,3 +217,31 @@ test("a model-started terminal returns immediately and wakes an idle parent on c
   assert.deepEqual(user, []);
   await hooks.get("session_shutdown")?.();
 });
+
+test("/term stop accepts space- and comma-separated ids", async () => {
+  const tools = new Map<string, any>();
+  const commands = new Map<string, any>();
+  const hooks = new Map<string, (...args: any[]) => any>();
+  extension({
+    registerTool(definition: any) { tools.set(definition.name, definition); },
+    registerCommand(name: string, definition: any) { commands.set(name, definition); },
+    registerMessageRenderer() {},
+    on: addHook(hooks),
+    sendMessage() {},
+    sendUserMessage() {},
+  } as never);
+  const notes: string[] = [];
+  const context = { cwd: process.cwd(), hasUI: false, isIdle: () => true, ui: { notify(message: string) { notes.push(message); } } };
+  hooks.get("session_start")?.({}, context);
+  const ids: string[] = [];
+  for (let index = 0; index < 3; index++) {
+    const started = await tools.get("start_terminal").execute(`call-${index}`, { command: "sleep 30", wait_ms: 0 }, undefined, undefined, context);
+    ids.push(started.details.id);
+  }
+  await commands.get("term").handler(`stop ${ids[0]}\t${ids[1]},${ids[2]}`, context);
+  const listed = await tools.get("list_terminals").execute("list", {}, undefined, undefined, context);
+  for (const id of ids) {
+    assert.equal(listed.details.terminals.find((terminal: any) => terminal.id === id)?.status, "killed", id);
+  }
+  await hooks.get("session_shutdown")?.();
+});

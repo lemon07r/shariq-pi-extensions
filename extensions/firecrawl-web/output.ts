@@ -26,8 +26,11 @@ async function writeArtifact(operation: string, value: unknown): Promise<string>
   return path;
 }
 
+// Room for the artifact footer, so the returned text stays within Pi's limits.
+const FOOTER_RESERVE_BYTES = 512;
+
 async function boundOutput(text: string, operation: string, raw: unknown, forceArtifact = false): Promise<string> {
-  const bounded = truncateHead(text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
+  const bounded = truncateHead(text, { maxBytes: DEFAULT_MAX_BYTES - FOOTER_RESERVE_BYTES, maxLines: DEFAULT_MAX_LINES - 2 });
   if (!bounded.truncated && !forceArtifact) return text;
   const path = await writeArtifact(operation, raw);
   if (!bounded.truncated) return `${text}\n\n[Complete Firecrawl response saved to: ${path}]`;

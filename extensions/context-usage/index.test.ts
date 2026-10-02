@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 import piContextUsage, { internals } from "./index.ts";
 
@@ -55,6 +56,47 @@ test("shutdown removes the injected panel, widget, and retained globals", async 
   assert.equal(globals.__piContextUsageBlock, undefined);
   assert.equal(globals.__piContextUsageChat, undefined);
   assert.equal(globals.__piContextUsageTui, undefined);
+});
+
+test("quiet startup still mounts the card, which stays inside narrow widths", async () => {
+  const handlers = new Map<string, (event: any, ctx: any) => any>();
+  piContextUsage({
+    on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, handler); },
+    registerCommand() {},
+    getActiveTools: () => ["read"],
+    getAllTools: () => [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} }, sourceInfo: { source: "builtin" } }],
+  } as never);
+  // quietStartup: Pi's document holds [header, empty loaded resources, chat].
+  const resources = { children: [] as unknown[] };
+  const document = { children: [{ children: [] }, resources, { children: [] }] };
+  const tui = { children: [document], requestRender() {} };
+  let capture: any;
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  await handlers.get("session_start")?.({}, {
+    hasUI: true,
+    cwd: "/tmp",
+    model: undefined,
+    isProjectTrusted: () => false,
+    getSystemPrompt: () => "You are a helpful assistant.",
+    getContextUsage: () => ({ tokens: 1200, contextWindow: 200000, percent: 0.6 }),
+    sessionManager: { getBranch: () => [], buildContextEntries: () => [], getEntries: () => [] },
+    ui: {
+      theme,
+      setWidget(name: string, value: any) { if (name === "__pi_context_usage_capture") capture = value; },
+      setHeader() { throw new Error("Context Usage must not replace another extension's header"); },
+    },
+  });
+  capture(tui).render(80);
+  const deadline = Date.now() + 2_000;
+  while (resources.children.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(resources.children.length, 1);
+  const block = resources.children[0] as { render(width: number): string[] };
+  for (const width of [80, 12, 3]) {
+    const lines = block.render(width);
+    assert.ok(lines.every((line) => visibleWidth(line) <= width), `width ${width}`);
+  }
+  assert.match(block.render(80).join("\n"), /~1\.2k|~1,200|~1200/);
+  await handlers.get("session_shutdown")?.({}, { hasUI: true, ui: { setWidget() {} } });
 });
 
 test("keeps core parsing and estimate helpers available", () => {

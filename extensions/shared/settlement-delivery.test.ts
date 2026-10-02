@@ -51,11 +51,13 @@ test("active-parent settlements wait locally and flush together at the safe idle
   ]);
 });
 
-test("distinct suite extension APIs share one coordinator for the same session", () => {
+test("separately loaded extension copies share one coordinator for the same session", async () => {
+  // Pi loads each extension entrypoint through its own module instance.
+  const copy = await import(`./settlement-delivery.ts?copy=${Date.now()}`) as typeof import("./settlement-delivery.ts");
   const firstApp = harness();
   const secondApp = harness();
   const first = settlementDelivery(firstApp.pi);
-  const second = settlementDelivery(secondApp.pi);
+  const second = copy.settlementDelivery(secondApp.pi);
   const sessionManager = {};
   start(firstApp, sessionManager);
   start(secondApp, sessionManager);

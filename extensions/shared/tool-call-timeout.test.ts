@@ -54,6 +54,17 @@ test("parent cancellation still stops the timeout wrapper immediately", async ()
   await assert.rejects(pending, (error: unknown) => error === reason);
 });
 
+test("an already-cancelled call never starts the tool", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("cancelled first"));
+  let started = false;
+  await assert.rejects(
+    runWithToolCallTimeout("side_effect", 60_000, controller.signal, async () => { started = true; }),
+    /cancelled first/,
+  );
+  assert.equal(started, false);
+});
+
 test("the guard wraps each definition once and can discover later tools", () => {
   const definitions = new Map<string, ToolDefinition>();
   const createDefinition = (name: string): ToolDefinition => ({
@@ -85,6 +96,12 @@ test("the guard wraps each definition once and can discover later tools", () => 
 
   assert.equal(first.execute, firstWrappedExecute);
   assert.notEqual(second.execute, secondExecute);
+
+  const waiting = createDefinition("ask_parent");
+  const waitingExecute = waiting.execute;
+  definitions.set(waiting.name, waiting);
+  createToolCallTimeoutGuard(10, new Set(["ask_parent"])).apply(registry);
+  assert.equal(waiting.execute, waitingExecute);
 });
 
 test("successful and terminating tool results pass through unchanged", async () => {

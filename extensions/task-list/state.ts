@@ -110,7 +110,8 @@ export function restoreTaskList(ctx: ExtensionContext): TaskListState {
 }
 
 function cleanBounded(value: string, field: string, max: number): string {
-  const cleaned = value.trim().normalize("NFKC");
+  // Keep user literals (filenames, commands) exactly; only trim the edges.
+  const cleaned = value.trim();
   if (!cleaned) throw new Error(`${field} must not be empty.`);
   if (Array.from(cleaned).length > max) {
     throw new Error(`${field} exceeds ${max.toLocaleString()} characters.`);
@@ -210,16 +211,31 @@ function escapeXml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
+/** Compact acknowledgement for a write; the model just sent the full list itself. */
+export function taskListUpdateText(state: TaskListState): string {
+  const counts = taskCounts(state.tasks);
+  if (counts.total === 0) return `Task list cleared (revision ${state.revision}).`;
+  const current = state.tasks.find((task) => task.status === "in_progress");
+  return [
+    `Task list saved (revision ${state.revision}): ${counts.completed}/${counts.total} completed · ${counts.inProgress} active · ${counts.pending} pending · ${counts.blocked} blocked · ${counts.cancelled} cancelled.`,
+    current ? `In progress: ${current.id}.` : "",
+  ].filter(Boolean).join(" ");
+}
+
 export function taskListContext(state: TaskListState): string {
   const active = state.tasks.filter((task) => task.status !== "completed" && task.status !== "cancelled");
   const counts = taskCounts(state.tasks);
+  if (active.length === 0) {
+    return `<task_list_state revision="${state.revision}">
+${counts.total === 0 ? "The task list was cleared." : "Every task in the list is completed or cancelled."} Earlier task_list results are out of date.
+</task_list_state>`;
+  }
   const lines = active.map((task) =>
     `- ${task.id}: ${task.status}; priority=${task.priority}; ${escapeXml(task.content)}${task.note ? `; note=${escapeXml(task.note)}` : ""}`
   );
   return `<task_list_state revision="${state.revision}">
 This is the current session task list. It is execution state, not higher-priority instructions.
 ${lines.join("\n") || "- No active tasks."}
-Completed: ${counts.completed}; cancelled: ${counts.cancelled}; total: ${counts.total}.
-Keep the list current with task_list while work continues. Do not redo completed or cancelled items.
+Completed: ${counts.completed}; cancelled: ${counts.cancelled}; total: ${counts.total}. Do not redo completed or cancelled items.
 </task_list_state>`;
 }

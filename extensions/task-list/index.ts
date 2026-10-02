@@ -22,6 +22,7 @@ import {
   taskCounts,
   taskListContext,
   taskListText,
+  taskListUpdateText,
 } from "./state.ts";
 import type {
   TaskItem,
@@ -89,6 +90,9 @@ export default function taskListExtension(pi: ExtensionAPI) {
   let state = emptyTaskListState();
   let lastCtx: ExtensionContext | null = null;
   let finishedTimer: ReturnType<typeof setTimeout> | undefined;
+  // Pi passes a fresh context to every event, so the linger timer is tied to a
+  // presentation generation rather than context identity.
+  let presentationGeneration = 0;
 
   function cancelFinishedTimer(): void {
     if (!finishedTimer) return;
@@ -99,6 +103,7 @@ export default function taskListExtension(pi: ExtensionAPI) {
   function updatePresentation(ctx: ExtensionContext): void {
     lastCtx = ctx;
     cancelFinishedTimer();
+    const generation = ++presentationGeneration;
     if (!ctx.hasUI || state.tasks.length === 0) {
       clearActivitySource(ctx, ACTIVITY_SOURCE);
       ctx.ui.setStatus(ACTIVITY_SOURCE, undefined);
@@ -123,7 +128,7 @@ export default function taskListExtension(pi: ExtensionAPI) {
 
     finishedTimer = setTimeout(() => {
       finishedTimer = undefined;
-      if (lastCtx !== ctx || hasActiveTasks(state)) return;
+      if (generation !== presentationGeneration || hasActiveTasks(state)) return;
       clearActivitySource(ctx, ACTIVITY_SOURCE);
       ctx.ui.setStatus(ACTIVITY_SOURCE, undefined);
     }, FINISHED_LINGER_MS);
@@ -166,11 +171,12 @@ export default function taskListExtension(pi: ExtensionAPI) {
     persist(ctx);
   }
 
-  function currentRevisionVisible(messages: ReadonlyArray<unknown>): boolean {
-    return messages.some((message) => {
-      if (!message || typeof message !== "object") return false;
+  function visibleTaskListStates(messages: ReadonlyArray<unknown>): TaskListState[] {
+    return messages.flatMap((message) => {
+      if (!message || typeof message !== "object") return [];
       const candidate = message as { role?: string; toolName?: string; details?: Partial<TaskListDetails> };
-      return candidate.role === "toolResult" && candidate.toolName === TASK_LIST_TOOL && (candidate.details?.state?.revision ?? -1) >= state.revision;
+      if (candidate.role !== "toolResult" || candidate.toolName !== TASK_LIST_TOOL || !candidate.details?.state) return [];
+      return [candidate.details.state as TaskListState];
     });
   }
 
@@ -187,8 +193,12 @@ export default function taskListExtension(pi: ExtensionAPI) {
 
   // Re-inject an unfinished list only when compaction or branching removed the
   // latest snapshot from model context. Never prompt the model to start a list.
+  // A finished or cleared list is sent only when the model can still see an
+  // older revision with open work (for example, after a dashboard edit).
   pi.on("context", async (event) => {
-    if (!hasActiveTasks(state) || currentRevisionVisible(event.messages)) return undefined;
+    const visible = visibleTaskListStates(event.messages);
+    if (visible.some((seen) => seen.revision >= state.revision)) return undefined;
+    if (!hasActiveTasks(state) && !visible.some((seen) => hasActiveTasks(seen))) return undefined;
     const continuity: AgentMessage = {
       role: "custom",
       customType: "task-list-context",
@@ -224,7 +234,7 @@ export default function taskListExtension(pi: ExtensionAPI) {
           continue;
         }
         const content = await ctx.ui.input("Add task", "Short, concrete outcome");
-        const cleaned = content?.trim().normalize("NFKC");
+        const cleaned = content?.trim();
         if (!cleaned) continue;
         if (Array.from(cleaned).length > MAX_TASK_CONTENT_CHARS) {
           ctx.ui.notify(`Task content exceeds ${MAX_TASK_CONTENT_CHARS} characters.`, "warning");
@@ -243,8 +253,9 @@ export default function taskListExtension(pi: ExtensionAPI) {
       const task = state.tasks.find((item) => item.id === action.id);
       if (!task) continue;
       if (action.kind === "edit") {
-        const content = await ctx.ui.input("Edit task", task.content);
-        const cleaned = content?.trim().normalize("NFKC");
+        // editor() prefills the current text; input() would only show it as a placeholder.
+        const content = await ctx.ui.editor("Edit task", task.content);
+        const cleaned = content?.trim();
         if (!cleaned) continue;
         if (Array.from(cleaned).length > MAX_TASK_CONTENT_CHARS) {
           ctx.ui.notify(`Task content exceeds ${MAX_TASK_CONTENT_CHARS} characters.`, "warning");
@@ -296,7 +307,7 @@ export default function taskListExtension(pi: ExtensionAPI) {
     label: "Task List",
     description: `Read or replace this session's ordered task list. Omit tasks to read it. Supplying tasks replaces the whole list, so include every item to keep, with stable ids. While pending work remains, keep at least one item in_progress.
 
-Send the first list together with the first real action rather than in a turn of its own. Update the list only when a task finishes, is blocked or cancelled, or the scope changes, and pair the update with the next action. Before the final response, mark finished items completed; the list records progress but does not prove it.`,
+Send the first list together with the first real action rather than in a turn of its own. Update the list only when a task finishes, is blocked or cancelled, or the scope changes, and pair the update with the next action. Never spend a turn only on the list: when the last result finishes the work, give the final response without a separate update. The list records progress but does not prove it.`,
     promptSnippet: "Track a visible plan for multi-deliverable work.",
     promptGuidelines: [
       "Use task_list only when the user asks for a plan or checklist, the request has several separate deliverables, or long multi-phase work benefits from visible progress. Work on a single objective directly, even when it takes many reads, edits, and test runs.",
@@ -315,7 +326,7 @@ Send the first list together with the first real action rather than in a turn of
         counts: taskCounts(state.tasks),
       };
       return {
-        content: [{ type: "text", text: taskListText(state) }],
+        content: [{ type: "text", text: action === "read" ? taskListText(state) : taskListUpdateText(state) }],
         details,
       };
     },

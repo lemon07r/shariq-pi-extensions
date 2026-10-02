@@ -1,11 +1,20 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
+import type { Readable } from "node:stream";
+import zlib from "node:zlib";
+import { NodeHtmlMarkdown } from "node-html-markdown";
+import { parse as parseHtml } from "node-html-parser";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const HARD_MAX_BYTES = 25 * 1024 * 1024;
+const MAX_REDIRECTS = 10;
+/** Opt in to localhost, private, link-local, and other non-public destinations. */
+export const ALLOW_PRIVATE_ENV = "PI_WEB_FETCH_ALLOW_PRIVATE";
 
 type FetchFormat = "markdown" | "text" | "html";
 
@@ -34,7 +43,7 @@ type RawFetchResponse = {
   status: number;
   statusText: string;
   contentType: string;
-  cfMitigated?: string | null;
+  cfMitigated?: string;
   bytes: Uint8Array;
   truncated: boolean;
 };
@@ -58,104 +67,187 @@ function validateUrl(input: string): URL {
   return parsed;
 }
 
-function acceptHeader(format: FetchFormat): string {
-  switch (format) {
-    case "markdown":
-      return "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1";
-    case "text":
-      return "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1";
-    case "html":
-      return "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1";
+// --- Destination policy -------------------------------------------------------
+
+const BLOCKED = new net.BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16],
+  ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const) BLOCKED.addSubnet(network, prefix, "ipv4");
+for (const [network, prefix] of [
+  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8],
+] as const) BLOCKED.addSubnet(network, prefix, "ipv6");
+
+/** True for loopback, private, link-local (cloud metadata), CGNAT, multicast, and reserved addresses. */
+export function isBlockedAddress(address: string): boolean {
+  const family = net.isIP(address);
+  if (family === 4) return BLOCKED.check(address, "ipv4");
+  if (family !== 6) return true;
+  // IPv4-mapped and NAT64 addresses reach the embedded IPv4 destination.
+  const embedded = /^(?:::ffff:|64:ff9b::)(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1];
+  if (embedded) return BLOCKED.check(embedded, "ipv4");
+  const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(address);
+  if (mappedHex) {
+    const high = Number.parseInt(mappedHex[1]!, 16);
+    const low = Number.parseInt(mappedHex[2]!, 16);
+    return BLOCKED.check(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`, "ipv4");
   }
+  return BLOCKED.check(address, "ipv6");
 }
 
-function stripActiveHtml(html: string): string {
-  return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "")
-    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, "")
-    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, "")
-    .replace(/<embed\b[^>]*>[\s\S]*?<\/embed>/gi, "")
-    .replace(/<svg\b[^>]*>[\s\S]*?<\/svg>/gi, "")
-    .replace(/<head\b[^>]*>[\s\S]*?<\/head>/gi, "");
+function privateAllowed() {
+  return /^(?:1|true|yes)$/i.test(process.env[ALLOW_PRIVATE_ENV] ?? "");
 }
 
-function decodeEntities(text: string): string {
-  const named: Record<string, string> = {
-    amp: "&",
-    lt: "<",
-    gt: ">",
-    quot: '"',
-    apos: "'",
-    nbsp: " ",
-    copy: "©",
-    reg: "®",
-    trade: "™",
-    mdash: "—",
-    ndash: "–",
-    hellip: "…",
+function blockedError(target: string) {
+  return new Error(
+    `Blocked request to ${target}: it is a local or private network address. Set ${ALLOW_PRIVATE_ENV}=1 to allow it.`,
+  );
+}
+
+/**
+ * Resolve once, drop non-public addresses, and connect only to what was
+ * checked. Binding the socket to the validated answer prevents DNS rebinding.
+ */
+function guardedLookup(allowPrivate: boolean): net.LookupFunction {
+  return (hostname, options, callback) => {
+    dns.lookup(hostname, { ...options, all: true }, (error, addresses) => {
+      if (error) return callback(error, "", 0);
+      const allowed = allowPrivate ? addresses : addresses.filter((entry) => !isBlockedAddress(entry.address));
+      if (allowed.length === 0) return callback(blockedError(hostname), "", 0);
+      if (options.all) return (callback as unknown as (error: null, addresses: dns.LookupAddress[]) => void)(null, allowed);
+      callback(null, allowed[0]!.address, allowed[0]!.family);
+    });
   };
-  return text.replace(/&(#x?[0-9a-f]+|[a-z][a-z0-9]+);/gi, (_m, entity: string) => {
-    const lower = entity.toLowerCase();
-    if (lower[0] === "#") {
-      const code = lower[1] === "x" ? Number.parseInt(lower.slice(2), 16) : Number.parseInt(lower.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : _m;
-    }
-    return named[lower] ?? _m;
+}
+
+function checkLiteralHost(url: URL, allowPrivate: boolean) {
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (!allowPrivate && net.isIP(host) && isBlockedAddress(host)) throw blockedError(url.hostname);
+}
+
+// --- Transport ----------------------------------------------------------------
+
+function header(res: http.IncomingMessage, name: string): string | undefined {
+  const value = res.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function decodedBody(res: http.IncomingMessage): Readable {
+  const encoding = header(res, "content-encoding")?.trim().toLowerCase();
+  const decoder = encoding === "gzip" || encoding === "x-gzip"
+    ? zlib.createGunzip()
+    : encoding === "deflate"
+      ? zlib.createInflate()
+      : encoding === "br"
+        ? zlib.createBrotliDecompress()
+        : undefined;
+  if (!decoder) return res;
+  res.on("error", (error) => decoder.destroy(error));
+  return res.pipe(decoder);
+}
+
+/** Read at most maxBytes of decoded output, then stop the transfer. */
+function readBounded(res: http.IncomingMessage, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  return new Promise((resolve, reject) => {
+    const body = decodedBody(res);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let finished = false;
+    const finish = (truncated: boolean) => {
+      if (finished) return;
+      finished = true;
+      resolve({ bytes: new Uint8Array(Buffer.concat(chunks, total)), truncated });
+    };
+    body.on("data", (chunk: Buffer) => {
+      if (finished) return;
+      const remaining = maxBytes - total;
+      if (chunk.byteLength > remaining) {
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        total = maxBytes;
+        res.destroy();
+        body.destroy();
+        finish(true);
+        return;
+      }
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    });
+    body.on("end", () => finish(false));
+    body.on("error", (error) => {
+      if (!finished) {
+        finished = true;
+        reject(error);
+      }
+    });
   });
 }
 
-function normalizeWhitespace(text: string): string {
-  return decodeEntities(text)
-    .replace(/\r\n?/g, "\n")
-    .replace(/[\t ]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function extractTextFromHtml(html: string): string {
-  const cleaned = stripActiveHtml(html)
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|section|article|header|footer|main|aside|nav|li|tr|h[1-6])\s*>/gi, "\n")
-    .replace(/<[^>]+>/g, "");
-  return normalizeWhitespace(cleaned);
-}
-
-function convertHtmlToMarkdown(html: string): string {
-  let text = stripActiveHtml(html);
-  text = text.replace(/<!--([\s\S]*?)-->/g, "");
-  text = text.replace(/<\s*br\s*\/?>/gi, "\n");
-  text = text.replace(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi, (_m, c) => `\n# ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<h2\b[^>]*>([\s\S]*?)<\/h2>/gi, (_m, c) => `\n## ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<h3\b[^>]*>([\s\S]*?)<\/h3>/gi, (_m, c) => `\n### ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<h4\b[^>]*>([\s\S]*?)<\/h4>/gi, (_m, c) => `\n#### ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<h5\b[^>]*>([\s\S]*?)<\/h5>/gi, (_m, c) => `\n##### ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<h6\b[^>]*>([\s\S]*?)<\/h6>/gi, (_m, c) => `\n###### ${extractTextFromHtml(c)}\n`);
-  text = text.replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_m, href, c) => {
-    const label = extractTextFromHtml(c) || href;
-    return `[${label}](${href})`;
+function request(
+  url: URL,
+  headers: Record<string, string>,
+  maxBytes: number,
+  signal: AbortSignal,
+  open: Set<http.ClientRequest>,
+  allowPrivate: boolean,
+  redirects = 0,
+): Promise<RawFetchResponse> {
+  const transport = url.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    // Inside the executor so a blocked redirect target rejects instead of throwing.
+    checkLiteralHost(url, allowPrivate);
+    const req = transport.request(url, {
+      method: "GET",
+      headers: { ...headers, "Accept-Encoding": "gzip, deflate, br" },
+      lookup: guardedLookup(allowPrivate),
+      signal,
+    }, (res) => {
+      const status = res.statusCode ?? 0;
+      const location = header(res, "location");
+      if ([301, 302, 303, 307, 308].includes(status) && location) {
+        // Close the redirect body before following; never drain it unbounded.
+        res.destroy();
+        if (redirects >= MAX_REDIRECTS) return reject(new Error(`Too many redirects (more than ${MAX_REDIRECTS})`));
+        let next: URL;
+        try {
+          next = validateUrl(new URL(location, url).toString());
+        } catch (error) {
+          return reject(error);
+        }
+        request(next, headers, maxBytes, signal, open, allowPrivate, redirects + 1).then(resolve, reject);
+        return;
+      }
+      const declared = Number.parseInt(header(res, "content-length") ?? "", 10);
+      if (Number.isFinite(declared) && declared > maxBytes && !header(res, "content-encoding")) {
+        res.destroy();
+        return reject(new Error(`Response too large: content-length ${declared} exceeds ${maxBytes} bytes`));
+      }
+      readBounded(res, maxBytes).then(({ bytes, truncated }) => resolve({
+        finalUrl: url.toString(),
+        status,
+        statusText: res.statusMessage ?? "",
+        contentType: header(res, "content-type") ?? "",
+        cfMitigated: header(res, "cf-mitigated"),
+        bytes,
+        truncated,
+      }), reject);
+    });
+    open.add(req);
+    req.on("close", () => open.delete(req));
+    req.on("error", (error) => reject(signal.aborted && signal.reason instanceof Error ? signal.reason : error));
+    req.end();
   });
-  text = text.replace(/<strong\b[^>]*>([\s\S]*?)<\/strong>/gi, (_m, c) => `**${extractTextFromHtml(c)}**`);
-  text = text.replace(/<b\b[^>]*>([\s\S]*?)<\/b>/gi, (_m, c) => `**${extractTextFromHtml(c)}**`);
-  text = text.replace(/<em\b[^>]*>([\s\S]*?)<\/em>/gi, (_m, c) => `*${extractTextFromHtml(c)}*`);
-  text = text.replace(/<i\b[^>]*>([\s\S]*?)<\/i>/gi, (_m, c) => `*${extractTextFromHtml(c)}*`);
-  text = text.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_m, c) => `\`${extractTextFromHtml(c)}\``);
-  text = text.replace(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi, (_m, c) => `\n\n\`\`\`\n${extractTextFromHtml(c)}\n\`\`\`\n\n`);
-  text = text.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_m, c) => `\n- ${extractTextFromHtml(c)}`);
-  text = text.replace(/<\/(p|div|section|article|header|footer|main|aside|nav|ul|ol|blockquote)\s*>/gi, "\n\n");
-  text = text.replace(/<[^>]+>/g, "");
-  return normalizeWhitespace(text);
 }
 
-function isHtml(contentType: string, text: string): boolean {
-  return /\b(?:text\/html|application\/xhtml\+xml)\b/i.test(contentType) || /^\s*<!doctype html|<html\b|<body\b/i.test(text);
+// --- Decoding and conversion ----------------------------------------------------
+
+function mimeType(contentType: string) {
+  return contentType.split(";")[0]?.trim().toLowerCase() ?? "";
 }
 
 function isSupportedText(contentType: string): boolean {
   if (!contentType) return true;
-  const mime = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  const mime = mimeType(contentType);
   return mime.startsWith("text/") || [
     "application/json",
     "application/xml",
@@ -168,219 +260,114 @@ function isSupportedText(contentType: string): boolean {
   ].includes(mime) || mime.endsWith("+json") || mime.endsWith("+xml");
 }
 
-async function readResponseBounded(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-  const contentLength = response.headers.get("content-length");
-  if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
-    throw new Error(`Response too large: content-length ${contentLength} exceeds ${maxBytes} bytes`);
-  }
-  if (!response.body) {
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    return { bytes: buffer.slice(0, maxBytes), truncated: buffer.byteLength > maxBytes };
-  }
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  let truncated = false;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    if (total + value.byteLength > maxBytes) {
-      const remaining = maxBytes - total;
-      if (remaining > 0) chunks.push(value.slice(0, remaining));
-      total = maxBytes;
-      truncated = true;
-      try { await reader.cancel(); } catch {}
-      break;
-    }
-    chunks.push(value);
-    total += value.byteLength;
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { bytes: out, truncated };
+/** Explicit HTML types win; sniff only when the type is missing or generic. */
+export function isHtml(contentType: string, text: string): boolean {
+  const mime = mimeType(contentType);
+  if (mime === "text/html" || mime === "application/xhtml+xml") return true;
+  if (mime && mime !== "text/plain" && mime !== "application/octet-stream") return false;
+  return /^\s*(?:<!doctype html|<html\b|<head\b|<body\b)/i.test(text);
 }
 
-async function fetchWithFetch(requestedUrl: string, headers: Record<string, string>, signal: AbortSignal, maxBytes: number): Promise<RawFetchResponse> {
-  const response = await fetch(requestedUrl, { headers, redirect: "follow", signal });
-  const { bytes, truncated } = await readResponseBounded(response, maxBytes);
-  return {
-    finalUrl: response.url || requestedUrl,
-    status: response.status,
-    statusText: response.statusText,
-    contentType: response.headers.get("content-type") ?? "",
-    cfMitigated: response.headers.get("cf-mitigated"),
-    bytes,
-    truncated,
-  };
+/** Pick the encoding from the BOM, the Content-Type charset, then an HTML meta declaration. */
+export function decodeBody(bytes: Uint8Array, contentType: string): string {
+  let label = "utf-8";
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) label = "utf-8";
+  else if (bytes[0] === 0xff && bytes[1] === 0xfe) label = "utf-16le";
+  else if (bytes[0] === 0xfe && bytes[1] === 0xff) label = "utf-16be";
+  else {
+    const declared = /;\s*charset\s*=\s*"?([^";\s]+)/i.exec(contentType)?.[1];
+    const head = Buffer.from(bytes.subarray(0, 4096)).toString("latin1");
+    const meta = /<meta[^>]+charset\s*=\s*["']?([\w:.-]+)/i.exec(head)?.[1];
+    label = declared ?? meta ?? "utf-8";
+  }
+  try {
+    return new TextDecoder(label, { fatal: false }).decode(bytes);
+  } catch {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
 }
 
-function readNodeResponseBounded(res: http.IncomingMessage, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
-  return new Promise((resolve, reject) => {
-    const contentLength = res.headers["content-length"];
-    const declared = Array.isArray(contentLength) ? contentLength[0] : contentLength;
-    if (declared && Number.parseInt(declared, 10) > maxBytes) {
-      res.resume();
-      reject(new Error(`Response too large: content-length ${declared} exceeds ${maxBytes} bytes`));
-      return;
-    }
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    let truncated = false;
-    res.on("data", (chunk: Buffer) => {
-      if (truncated) return;
-      if (total + chunk.byteLength > maxBytes) {
-        const remaining = maxBytes - total;
-        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
-        total = maxBytes;
-        truncated = true;
-        res.destroy();
-        return;
-      }
-      chunks.push(chunk);
-      total += chunk.byteLength;
-    });
-    res.on("end", () => {
-      const out = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        out.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      resolve({ bytes: out, truncated });
-    });
-    res.on("close", () => {
-      if (!truncated) return;
-      const out = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        out.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      resolve({ bytes: out, truncated });
-    });
-    res.on("error", reject);
-  });
+function longestBacktickRun(text: string) {
+  let longest = 0;
+  for (const match of text.matchAll(/`+/g)) longest = Math.max(longest, match[0].length);
+  return longest;
 }
 
-function fetchWithNodeIpv4(requestedUrl: string, headers: Record<string, string>, timeoutMs: number, maxBytes: number, signal?: AbortSignal, redirects = 0): Promise<RawFetchResponse> {
-  const url = validateUrl(requestedUrl);
-  const transport = url.protocol === "https:" ? https : http;
-  return new Promise((resolve, reject) => {
-    const req = transport.request({
-      protocol: url.protocol,
-      host: url.hostname,
-      port: url.port || undefined,
-      path: `${url.pathname}${url.search}`,
-      method: "GET",
-      family: 4,
-      timeout: timeoutMs,
-      headers,
-    }, async (res) => {
-      const status = res.statusCode ?? 0;
-      const location = Array.isArray(res.headers.location) ? res.headers.location[0] : res.headers.location;
-      if ([301, 302, 303, 307, 308].includes(status) && location && redirects < 10) {
-        res.resume();
-        try {
-          resolve(await fetchWithNodeIpv4(new URL(location, url).toString(), headers, timeoutMs, maxBytes, signal, redirects + 1));
-        } catch (error) {
-          reject(error);
-        }
-        return;
-      }
+/** Parse once, drop active content, and resolve relative links against the final URL. */
+function cleanHtml(html: string, baseUrl: string) {
+  const root = parseHtml(html, { comment: false });
+  root.querySelectorAll("script,style,noscript,template,iframe,object,embed,svg,head").forEach((node) => node.remove());
+  for (const element of root.querySelectorAll("[href],[src]")) {
+    for (const attribute of ["href", "src"]) {
+      const value = element.getAttribute(attribute);
+      if (!value || value.startsWith("#")) continue;
       try {
-        const { bytes, truncated } = await readNodeResponseBounded(res, maxBytes);
-        const contentType = Array.isArray(res.headers["content-type"]) ? res.headers["content-type"][0] : res.headers["content-type"] ?? "";
-        const cfMitigated = Array.isArray(res.headers["cf-mitigated"]) ? res.headers["cf-mitigated"][0] : res.headers["cf-mitigated"] ?? null;
-        resolve({
-          finalUrl: url.toString(),
-          status,
-          statusText: res.statusMessage ?? "",
-          contentType,
-          cfMitigated,
-          bytes,
-          truncated,
-        });
-      } catch (error) {
-        reject(error);
+        element.setAttribute(attribute, new URL(value, baseUrl).toString());
+      } catch {
+        // Leave unparseable references unchanged.
       }
-    });
-    const onAbort = () => req.destroy(signal?.reason instanceof Error ? signal.reason : new Error("Request aborted"));
-    if (signal?.aborted) onAbort();
-    else signal?.addEventListener("abort", onAbort, { once: true });
-    req.on("close", () => signal?.removeEventListener("abort", onAbort));
-    req.on("timeout", () => req.destroy(new Error("Request timed out")));
-    req.on("error", reject);
-    req.end();
-  });
+    }
+  }
+  return root;
 }
 
-function shouldUseIpv4Fallback(error: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return false;
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } };
-  const code = typeof candidate?.cause?.code === "string"
-    ? candidate.cause.code
-    : typeof candidate?.code === "string"
-      ? candidate.code
-      : "";
-  return ["ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "EAI_AGAIN"].includes(code);
+export function htmlToMarkdown(html: string, baseUrl: string): string {
+  const root = cleanHtml(html, baseUrl);
+  const preText = root.querySelectorAll("pre").map((node) => node.textContent).join("\n");
+  // A fence longer than any backtick run inside code blocks keeps them intact.
+  const codeFence = "`".repeat(Math.max(3, longestBacktickRun(preText) + 1));
+  return NodeHtmlMarkdown.translate(root.toString(), { codeFence }).trim();
 }
+
+export function htmlToText(html: string, baseUrl: string): string {
+  return cleanHtml(html, baseUrl).structuredText.trim();
+}
+
+// --- Tool ------------------------------------------------------------------------
 
 async function fetchUrl(params: WebFetchParams, signal?: AbortSignal): Promise<FetchResult> {
-  const requestedUrl = validateUrl(params.url).toString();
+  const requested = validateUrl(params.url);
   const format = params.format ?? "markdown";
   if (!["markdown", "text", "html"].includes(format)) throw new Error("format must be markdown, text, or html");
   const timeoutMs = clampNumber(params.timeoutSeconds, DEFAULT_TIMEOUT_MS / 1000, 1, MAX_TIMEOUT_MS / 1000) * 1000;
   const maxBytes = clampNumber(params.maxBytes, DEFAULT_MAX_BYTES, 1024, HARD_MAX_BYTES);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error("Request timed out")), timeoutMs);
-  const abortFromParent = () => controller.abort(signal?.reason ?? new Error("Request aborted"));
-  if (signal) {
-    if (signal.aborted) abortFromParent();
-    else signal.addEventListener("abort", abortFromParent, { once: true });
-  }
+  const allowPrivate = privateAllowed();
+  // One deadline covers every redirect and retry; aborting it destroys open sockets.
+  const signals = [AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])];
+  const deadline = AbortSignal.any(signals);
+  const open = new Set<http.ClientRequest>();
 
   const headers = {
     "User-Agent": params.userAgent?.trim() || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-    Accept: acceptHeader(format),
+    Accept: format === "html"
+      ? "text/html;q=1.0, application/xhtml+xml;q=0.9, text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
+      : format === "text"
+        ? "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1"
+        : "text/markdown;q=1.0, text/x-markdown;q=0.9, text/plain;q=0.8, text/html;q=0.7, */*;q=0.1",
     "Accept-Language": "en-US,en;q=0.9",
   };
 
   try {
-    let response: RawFetchResponse;
-    try {
-      response = await fetchWithFetch(requestedUrl, headers, controller.signal, maxBytes);
-    } catch (error) {
-      if (!shouldUseIpv4Fallback(error, controller.signal)) throw error;
-      response = await fetchWithNodeIpv4(requestedUrl, headers, timeoutMs, maxBytes, controller.signal);
-    }
+    let response = await request(requested, headers, maxBytes, deadline, open, allowPrivate);
     if (response.status === 403 && response.cfMitigated === "challenge" && !params.userAgent) {
-      const honestHeaders = { ...headers, "User-Agent": "pi-web-fetch" };
-      try {
-        response = await fetchWithFetch(requestedUrl, honestHeaders, controller.signal, maxBytes);
-      } catch (error) {
-        if (!shouldUseIpv4Fallback(error, controller.signal)) throw error;
-        response = await fetchWithNodeIpv4(requestedUrl, honestHeaders, timeoutMs, maxBytes, controller.signal);
-      }
+      response = await request(requested, { ...headers, "User-Agent": "pi-web-fetch" }, maxBytes, deadline, open, allowPrivate);
     }
     if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
     const contentType = response.contentType;
     if (!isSupportedText(contentType)) throw new Error(`Unsupported content type: ${contentType || "unknown"}`);
 
-    const raw = new TextDecoder("utf-8", { fatal: false }).decode(response.bytes);
+    const raw = decodeBody(response.bytes, contentType);
     const html = isHtml(contentType, raw);
-    let text: string;
-    if (format === "html") text = raw;
-    else if (format === "text") text = html ? extractTextFromHtml(raw) : normalizeWhitespace(raw);
-    else text = html ? convertHtmlToMarkdown(raw) : normalizeWhitespace(raw);
+    // Non-HTML payloads (JSON, Markdown, code) are returned exactly as served.
+    const text = format === "html" || !html
+      ? raw
+      : format === "text"
+        ? htmlToText(raw, response.finalUrl)
+        : htmlToMarkdown(raw, response.finalUrl);
 
     return {
-      url: requestedUrl,
+      url: requested.toString(),
       finalUrl: response.finalUrl,
       status: response.status,
       statusText: response.statusText,
@@ -390,9 +377,11 @@ async function fetchUrl(params: WebFetchParams, signal?: AbortSignal): Promise<F
       truncated: response.truncated,
       text,
     };
+  } catch (error) {
+    if (deadline.aborted && !signal?.aborted) throw new Error(`Request timed out after ${timeoutMs / 1000} seconds`);
+    throw error;
   } finally {
-    clearTimeout(timer);
-    if (signal) signal.removeEventListener("abort", abortFromParent);
+    for (const req of open) req.destroy();
   }
 }
 
@@ -417,14 +406,14 @@ export default function webFetchExtension(pi: ExtensionAPI) {
     },
     async execute(_toolCallId: string, params: WebFetchParams, signal?: AbortSignal) {
       const result = await fetchUrl(params, signal);
-        const header = [
-          `URL: ${result.url}`,
-          result.finalUrl !== result.url ? `Final URL: ${result.finalUrl}` : undefined,
-          `Status: ${result.status} ${result.statusText}`,
-          `Content-Type: ${result.contentType || "unknown"}`,
-          `Format: ${result.format}`,
-          `Bytes read: ${result.bytes}${result.truncated ? " (truncated)" : ""}`,
-        ].filter(Boolean).join("\n");
+      const header = [
+        `URL: ${result.url}`,
+        result.finalUrl !== result.url ? `Final URL: ${result.finalUrl}` : undefined,
+        `Status: ${result.status} ${result.statusText}`,
+        `Content-Type: ${result.contentType || "unknown"}`,
+        `Format: ${result.format}`,
+        `Bytes read: ${result.bytes}${result.truncated ? " (truncated)" : ""}`,
+      ].filter(Boolean).join("\n");
       return {
         content: [{ type: "text", text: `${header}\n\n${result.text}` }],
         details: {

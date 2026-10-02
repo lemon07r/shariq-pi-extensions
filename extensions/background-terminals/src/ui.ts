@@ -393,7 +393,8 @@ export class TerminalDetail implements Component, Focusable {
       this.close();
       return;
     }
-    if (data === "x") {
+    // Printable keys belong to the input field, so detail controls use modifiers.
+    if (matchesKey(data, Key.ctrl("x"))) {
       if (terminal?.status !== "running") return;
       if (this.killArmed) {
         this.killArmed = false;
@@ -404,23 +405,13 @@ export class TerminalDetail implements Component, Focusable {
       this.tui.requestRender();
       return;
     }
-    if (this.keybindings.matches(data, "tui.editor.pageUp") || data === "k") {
+    if (this.keybindings.matches(data, "tui.editor.pageUp")) {
       this.scrollOffset += Math.max(4, this.viewportHeight() - 2);
       this.tui.requestRender();
       return;
     }
-    if (this.keybindings.matches(data, "tui.editor.pageDown") || data === "j") {
+    if (this.keybindings.matches(data, "tui.editor.pageDown")) {
       this.scrollOffset = Math.max(0, this.scrollOffset - Math.max(4, this.viewportHeight() - 2));
-      this.tui.requestRender();
-      return;
-    }
-    if (data === "g") {
-      this.scrollOffset = Number.MAX_SAFE_INTEGER;
-      this.tui.requestRender();
-      return;
-    }
-    if (data === "G") {
-      this.scrollOffset = 0;
       this.tui.requestRender();
       return;
     }
@@ -462,10 +453,10 @@ export class TerminalDetail implements Component, Focusable {
     lines.push(frameBottom(theme, width));
     if (terminal.status === "running") lines.push(...this.input.render(width));
     else lines.push(truncateToWidth(`  ${theme.fg("muted", "Process settled; input is closed.")}`, width));
-    const stop = this.killArmed ? theme.fg("warning", "x again to stop") : "x stop (confirm)";
+    const stop = this.killArmed ? theme.fg("warning", "ctrl+x again to stop") : "ctrl+x stop (confirm)";
     lines.push(
       truncateToWidth(
-        theme.fg("dim", `  enter send · ctrl+c interrupt PTY · ${stop} · pgup/pgdn or j/k scroll · g/G top/bottom · ${configuredKeys(this.keybindings, "tui.select.cancel")} back`),
+        theme.fg("dim", `  enter send · ctrl+c interrupt PTY · ${stop} · pgup/pgdn scroll · ${configuredKeys(this.keybindings, "tui.select.cancel")} back`),
         width,
       ),
     );

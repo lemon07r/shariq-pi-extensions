@@ -9,7 +9,8 @@ interface GenerationMetrics {
   completedAt?: number;
   streamedChars: number;
   exactOutputTokens?: number;
-  activeTool?: string;
+  /** Running tool calls by id; parallel calls end independently. */
+  runningTools: Map<string, string>;
   phase: "idle" | "waiting" | "generating" | "tool" | "done";
 }
 
@@ -38,9 +39,9 @@ function values(metrics: GenerationMetrics, now = Date.now()) {
     : undefined;
   const estimatedTokens = metrics.streamedChars / 4;
   const outputTokens = metrics.exactOutputTokens ?? estimatedTokens;
-  // Conventional TPS measures decode throughput from first streamed token to
-  // completion. TTFT and elapsed time separately expose provider latency,
-  // prefill, and hidden reasoning before visible streaming begins.
+  // TPS is reported output tokens per second after the first streamed delta.
+  // TTFT runs from the provider HTTP call to that delta, so it covers provider
+  // latency, prefill, and any reasoning the provider does not stream.
   const generationSeconds = metrics.firstTokenAt
     ? Math.max(0, ((metrics.completedAt ?? now) - metrics.firstTokenAt) / 1_000)
     : undefined;
@@ -56,6 +57,12 @@ function values(metrics: GenerationMetrics, now = Date.now()) {
   };
 }
 
+function toolLabel(running: Map<string, string>) {
+  const [first] = running.values();
+  if (!first) return "tool running";
+  return running.size > 1 ? `tool ${first} +${running.size - 1}` : `tool ${first}`;
+}
+
 export function formatPerformanceStatus(
   metrics: GenerationMetrics,
   ctx: ExtensionContext,
@@ -68,7 +75,7 @@ export function formatPerformanceStatus(
     : metrics.phase === "generating"
       ? "generating"
       : metrics.phase === "tool"
-        ? `tool ${metrics.activeTool ?? "running"}`
+        ? toolLabel(metrics.runningTools)
         : "last response";
   const parts = [
     `${theme.fg("accent", "◆")} ${theme.fg(metrics.phase === "done" ? "muted" : "accent", label)}`,
@@ -85,7 +92,7 @@ export function formatPerformanceStatus(
 }
 
 export default function performanceStatus(pi: ExtensionAPI) {
-  const metrics: GenerationMetrics = { streamedChars: 0, phase: "idle" };
+  const metrics: GenerationMetrics = { streamedChars: 0, runningTools: new Map(), phase: "idle" };
   let renderTimer: ReturnType<typeof setTimeout> | undefined;
   let doneTimer: ReturnType<typeof setTimeout> | undefined;
   let lastRenderAt = 0;
@@ -133,9 +140,16 @@ export default function performanceStatus(pi: ExtensionAPI) {
     metrics.completedAt = undefined;
     metrics.streamedChars = 0;
     metrics.exactOutputTokens = undefined;
-    metrics.activeTool = undefined;
+    metrics.runningTools.clear();
     metrics.phase = "waiting";
     render(ctx, true);
+  });
+
+  // turn_start precedes local request preparation (context hooks, auth); the
+  // provider headers hook fires just before the HTTP call, including retries.
+  pi.on("before_provider_headers", () => {
+    if (metrics.phase !== "waiting") return;
+    metrics.requestStartedAt = Date.now();
   });
 
   pi.on("message_update", (event, ctx) => {
@@ -146,15 +160,6 @@ export default function performanceStatus(pi: ExtensionAPI) {
       metrics.streamedChars += update.delta.length;
       metrics.phase = "generating";
       render(ctx);
-      return;
-    }
-    if (update.type === "done") {
-      metrics.firstTokenAt ??= metrics.requestStartedAt ?? Date.now();
-      metrics.completedAt = Date.now();
-      metrics.exactOutputTokens = update.message.usage.output;
-      metrics.phase = "done";
-      render(ctx, true);
-      scheduleDoneHide(ctx);
     }
   });
 
@@ -169,14 +174,18 @@ export default function performanceStatus(pi: ExtensionAPI) {
 
   pi.on("tool_execution_start", (event, ctx) => {
     cancelDoneTimer();
-    metrics.activeTool = event.toolName;
+    metrics.runningTools.set(event.toolCallId, event.toolName);
     metrics.phase = "tool";
     render(ctx, true);
   });
 
-  pi.on("tool_execution_end", (_event, ctx) => {
-    metrics.activeTool = undefined;
-    metrics.phase = metrics.completedAt ? "done" : "generating";
+  pi.on("tool_execution_end", (event, ctx) => {
+    metrics.runningTools.delete(event.toolCallId);
+    if (metrics.runningTools.size > 0) {
+      render(ctx, true);
+      return;
+    }
+    metrics.phase = metrics.completedAt !== undefined ? "done" : "generating";
     render(ctx, true);
     if (metrics.phase === "done") scheduleDoneHide(ctx);
   });

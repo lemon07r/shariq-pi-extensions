@@ -16,8 +16,24 @@ export type ActivityItem = {
   priority?: number;
 };
 
-let activeUi: ExtensionContext["ui"] | undefined;
-const sources = new Map<string, ActivityItem[]>();
+type DockUi = ExtensionContext["ui"];
+
+// Pi loads every extension entrypoint through its own module instance, so a
+// module-local map would give each extension a private dock that overwrites
+// the others. Keep the per-UI state on a process-wide registry instead.
+const REGISTRY_KEY = Symbol.for("shariq-pi-extensions/activity-dock/v1");
+const registry: WeakMap<DockUi, Map<string, ActivityItem[]>> =
+  ((globalThis as Record<symbol, unknown>)[REGISTRY_KEY] as WeakMap<DockUi, Map<string, ActivityItem[]>> | undefined) ??
+  ((globalThis as Record<symbol, unknown>)[REGISTRY_KEY] = new WeakMap<DockUi, Map<string, ActivityItem[]>>()) as WeakMap<DockUi, Map<string, ActivityItem[]>>;
+
+function sourcesFor(ui: DockUi) {
+  let sources = registry.get(ui);
+  if (!sources) {
+    sources = new Map();
+    registry.set(ui, sources);
+  }
+  return sources;
+}
 
 function color(state: ActivityState): "accent" | "success" | "warning" | "error" | "muted" {
   if (state === "active") return "accent";
@@ -32,14 +48,7 @@ function glyph(state: ActivityState) {
   return "○";
 }
 
-function bind(ctx: ExtensionContext) {
-  if (activeUi === ctx.ui) return;
-  activeUi?.setWidget(WIDGET_ID, undefined);
-  activeUi = ctx.ui;
-  sources.clear();
-}
-
-function allItems() {
+function allItems(sources: Map<string, ActivityItem[]>) {
   return [...sources.entries()]
     .flatMap(([source, items]) => items.map((item, index) => ({ source, index, item })))
     .sort((left, right) =>
@@ -50,16 +59,15 @@ function allItems() {
     .map(({ item }) => item);
 }
 
-function publish(ctx: ExtensionContext) {
-  bind(ctx);
-  const items = allItems();
-  if (!ctx.hasUI || items.length === 0) {
+function publish(ctx: ExtensionContext, sources: Map<string, ActivityItem[]>) {
+  const items = allItems(sources);
+  if (items.length === 0) {
     ctx.ui.setWidget(WIDGET_ID, undefined);
     return;
   }
   ctx.ui.setWidget(WIDGET_ID, (_tui, theme) => ({
     render(width: number) {
-      const current = allItems();
+      const current = allItems(sources);
       const shown = current.slice(0, MAX_VISIBLE_ITEMS);
       const lines = [truncateToWidth(
         `${theme.fg("accent", theme.bold("Active work"))} ${theme.fg("muted", `${current.length}`)}`,
@@ -82,19 +90,22 @@ function publish(ctx: ExtensionContext) {
   }));
 }
 
+// Headless child sessions have no dock and must never touch another session's.
 export function setActivitySource(ctx: ExtensionContext, source: string, items: ActivityItem[]) {
-  bind(ctx);
+  if (!ctx.hasUI) return;
+  const sources = sourcesFor(ctx.ui);
   if (items.length) sources.set(source, items.map((item) => ({ ...item })));
   else sources.delete(source);
-  publish(ctx);
+  publish(ctx, sources);
 }
 
 export function clearActivitySource(ctx: ExtensionContext, source: string) {
-  bind(ctx);
-  sources.delete(source);
-  publish(ctx);
+  if (!ctx.hasUI) return;
+  const sources = sourcesFor(ctx.ui);
+  if (!sources.delete(source)) return;
+  publish(ctx, sources);
 }
 
-export function activityDockSnapshot() {
-  return allItems().map((item) => ({ ...item }));
+export function activityDockSnapshot(ui: DockUi) {
+  return allItems(registry.get(ui) ?? new Map()).map((item) => ({ ...item }));
 }

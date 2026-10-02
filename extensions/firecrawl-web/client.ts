@@ -191,11 +191,16 @@ function retryAfterMs(value: string | null): number | undefined {
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason ?? new Error("Request aborted"));
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
+    // Remove the listener on both paths so retries sharing a signal do not pile up.
+    const onAbort = () => {
       clearTimeout(timer);
-      reject(signal.reason ?? new Error("Request aborted"));
-    }, { once: true });
+      reject(signal?.reason ?? new Error("Request aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -260,7 +265,12 @@ export async function firecrawlRequest(
       });
 
       const contentLength = Number(response.headers.get("content-length") || 0);
-      if (contentLength > MAX_RESPONSE_BYTES) throw new Error("Firecrawl response exceeded 25 MiB.");
+      if (contentLength > MAX_RESPONSE_BYTES) {
+        // Stop the transfer instead of leaving the body streaming in the background.
+        await response.body?.cancel("Firecrawl response exceeded 25 MiB.").catch(() => undefined);
+        timeout.abort(new Error("Firecrawl response exceeded 25 MiB."));
+        throw new Error("Firecrawl response exceeded 25 MiB.");
+      }
       const bytes = await readResponseBounded(response);
       const text = new TextDecoder().decode(bytes);
       let payload: unknown;

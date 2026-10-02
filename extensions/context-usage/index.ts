@@ -2,6 +2,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import type { ContextUsage, ExtensionAPI, ExtensionContext, SessionEntry, Theme, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, convertToLlm, getAgentDir, keyText } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { stripAnsi } from "./lib/ansi.ts";
@@ -528,8 +529,10 @@ function splitConfigPaths(value: string | undefined, separator = delimiter): str
   return (value ?? "").split(separator).map((entry) => expandHomePath(entry.trim())).filter(Boolean);
 }
 
-function loadContextUsageConfig(cwd: string): ContextUsageConfig {
-  const paths = [...configPaths("pi-context-usage", cwd), ...splitConfigPaths(process.env.PI_CONTEXT_USAGE_CONFIG)];
+function loadContextUsageConfig(cwd: string, projectTrusted: boolean): ContextUsageConfig {
+  // The project file applies only to trusted projects; global and explicit env paths always apply.
+  const [globalPath, projectPath] = configPaths("pi-context-usage", cwd);
+  const paths = [globalPath!, ...(projectTrusted ? [projectPath!] : []), ...splitConfigPaths(process.env.PI_CONTEXT_USAGE_CONFIG)];
   return paths.reduce<ContextUsageConfig>(
     (config, filePath) => mergeContextUsageConfig(config, readJsonConfig(filePath, parseContextUsageConfig)),
     {},
@@ -1184,13 +1187,18 @@ function buildSnapshot(
   const session = buildSessionBreakdown(sessionManager);
   const contextUsage = getContextUsage?.();
 
+  // Hash the full rendered inputs: same-length prompt or schema edits must
+  // still invalidate cached counts.
+  const contentHash = createHash("sha1")
+    .update(systemPrompt)
+    .update(JSON.stringify(pi.getAllTools().map((tool) => [tool.name, tool.description, tool.parameters])))
+    .digest("hex");
   const signature = [
-    systemPrompt.length,
+    contentHash,
     model ? `${model.provider}:${model.id}:${model.api}` : "no-model",
     `${heuristic.label}:${heuristic.textDenominator}:${heuristic.sessionDenominator}:${heuristic.toolDenominator}:${heuristic.toolNumerator}`,
     JSON.stringify(config),
     pi.getActiveTools().join(","),
-    pi.getAllTools().map((tool) => `${tool.name}:${tool.description.length}`).join(","),
     session ? `${session.thinkingChars}:${session.toolOutputChars}:${session.messageChars}:${session.messageCount}` : "no-session",
     contextUsage ? `${contextUsage.tokens}:${contextUsage.contextWindow}:${contextUsage.percent}` : "no-usage",
   ].join("|");
@@ -1481,9 +1489,10 @@ function renderSessionRows(snapshot: PrefixSnapshot, theme: Theme, width: number
     rows.push(renderMetricRow({
       label: "Total request",
       tokens: usage.tokens,
-      exact: true,
+      // Pi reports this as an estimate (last usage plus trailing messages).
+      exact: false,
       emphasis: true,
-      detail: percent && window ? `(${percent} / ${window} ctx)` : "(Pi usage)",
+      detail: percent && window ? `(${percent} / ${window} ctx)` : "(Pi estimate)",
     }, theme, layout));
     rows.push(...renderContextBar(snapshot, estimate, theme, width));
   }
@@ -1536,7 +1545,7 @@ function renderSummary(snapshot: PrefixSnapshot, theme: Theme, width = 80): stri
   const percent = formatPercent(usage?.percent ?? null);
   const budgetParts = [
     `Harness ~${compactCount(harness)}`,
-    typeof request === "number" ? `Request ${compactCount(request)}` : undefined,
+    typeof request === "number" ? `Request ~${compactCount(request)}` : undefined,
     window && window > 0 ? `/ ${contextWindowLabel(window)}` : undefined,
     percent ? `· ${percent}` : undefined,
   ].filter(Boolean).join(" ");
@@ -1656,8 +1665,9 @@ function renderExpanded(snapshot: PrefixSnapshot, theme: Theme, width: number): 
   return lines;
 }
 
+// Wrap to the exact width Pi supplies; a minimum here would overflow narrow terminals.
 function wrapLines(lines: string[], width: number): string[] {
-  const maxWidth = Math.max(24, width);
+  const maxWidth = Math.max(1, width);
   const out: string[] = [];
   for (const rawLine of lines) {
     if (rawLine.length === 0) {
@@ -1737,7 +1747,7 @@ class StartupContextComponent implements Component {
       this.cachedSignature = snapshot.signature;
       this.cachedMode = this.mode;
       this.cachedWidth = width;
-      this.cachedLines = wrapLines(body, Math.max(20, width));
+      this.cachedLines = wrapLines(body, width);
       return this.cachedLines;
     } catch {
       this.cachedSignature = "context-usage-unavailable";
@@ -1746,7 +1756,7 @@ class StartupContextComponent implements Component {
       this.cachedLines = wrapLines([
         "",
         `${accent(undefined, "[Context Usage]")} unavailable while Pi finishes resuming this session`,
-      ], Math.max(20, width));
+      ], width);
       return this.cachedLines;
     }
   }
@@ -1807,9 +1817,24 @@ function isContextBlockInstalled(block: StartupContextComponent): boolean {
   return Array.isArray(chat?.children) && chat.children.includes(block);
 }
 
-function installContextBlock(block: StartupContextComponent): boolean {
+/**
+ * With quietStartup Pi renders no resource rows to anchor on. Pi's document
+ * container holds exactly [header, loaded resources, chat]; mount into the
+ * (empty) loaded-resources slot so the card sits in the same place.
+ */
+function findQuietStartupContainer(tui: unknown): ContainerLike | undefined {
+  const isContainer = (value: unknown) => !!value && typeof value === "object" && Array.isArray((value as { children?: unknown }).children);
+  const document = findContainerBy(tui, (children) => children.length === 3 && children.every(isContainer));
+  const resources = document?.children[1] as ContainerLike | undefined;
+  return resources && Array.isArray(resources.children) && resources.children.every((child) => isPrefixBlock(child) || isBlankComponent(child as Component))
+    ? resources
+    : undefined;
+}
+
+function installContextBlock(block: StartupContextComponent, allowQuietFallback = false): boolean {
   const tui = g.__piContextUsageTui;
-  const chat = findResourceChatContainer(tui) ?? g.__piContextUsageChat;
+  const chat = findResourceChatContainer(tui) ?? g.__piContextUsageChat ??
+    (allowQuietFallback ? findQuietStartupContainer(tui) : undefined);
   if (!chat || !Array.isArray(chat.children)) return false;
 
   g.__piContextUsageChat = chat;
@@ -1828,7 +1853,8 @@ function scheduleInstall(block: StartupContextComponent): void {
   let attempts = 0;
   const attempt = () => {
     attempts++;
-    if (safely(() => installContextBlock(block), false)) return;
+    // Prefer the resource-list anchor; fall back only after it has had time to render.
+    if (safely(() => installContextBlock(block, attempts > 10), false)) return;
     if (attempts < 30) {
       g.__piContextUsageInstallTimer = setTimeout(attempt, 50);
     }
@@ -1918,11 +1944,8 @@ export default function piContextUsage(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
 
-    // Restore Pi's normal header; this extension now renders below Pi's loaded-resource list.
-    ctx.ui.setHeader(undefined);
-
     const currentMode = g.__piContextUsageMode ?? DEFAULT_MODE;
-    const config = loadContextUsageConfig(ctx.cwd);
+    const config = loadContextUsageConfig(ctx.cwd, ctx.isProjectTrusted());
     g.__piContextUsageModel = toModelSummary(ctx.model);
     markDirty();
     const block = new StartupContextComponent(

@@ -97,8 +97,10 @@ export function createSmartCompactionExtension(options: SmartCompactionExtension
 
     // Smart Compaction's optional threshold policy is an upper-bound safeguard.
     // It runs from the context hook, where completed tool results are already in
-    // context, rather than from tool_result itself. Pi's native reserve-token
-    // threshold may still compact earlier.
+    // context, rather than from tool_result itself. ctx.compact() aborts the
+    // active run synchronously, before this hook returns, so the over-threshold
+    // request is cancelled rather than sent. Pi's native reserve-token threshold
+    // may still compact earlier.
     let thresholdCompactionPending = false;
     pi.on("context", (_event, ctx) => {
       if (!config.enabled || thresholdCompactionPending) return;
@@ -155,7 +157,19 @@ export function createSmartCompactionExtension(options: SmartCompactionExtension
           return;
         }
 
-        if (cmdCtx.hasUI) {
+        // The custom picker is a TUI component; RPC clients get a plain selector.
+        if (cmdCtx.mode === "rpc" && cmdCtx.hasUI) {
+          const choices = ["inherit", ...cmdCtx.modelRegistry.getAvailable().map((m) => `${m.provider}/${m.id}`)];
+          const selected = await cmdCtx.ui.select(`Compaction model (current: ${config.model})`, choices);
+          if (!selected) return;
+          config.model = selected;
+          saveSmartCompactionConfig(config, options.configFile);
+          updateStatus();
+          cmdCtx.ui.notify(`Compaction model set to: ${config.model}`, "info");
+          return;
+        }
+
+        if (cmdCtx.mode === "tui") {
           const selected = await openModelPicker(cmdCtx as never, {
             title: `Compaction Model (current: ${config.model})`,
             currentModel: config.model,

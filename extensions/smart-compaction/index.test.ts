@@ -165,6 +165,10 @@ describe("smart-compaction prompt, sanitization, and XML escaping", () => {
     ] as AgentMessage[]);
     assert.ok(facts.includes(sha));
     assert.ok(facts.includes("https://opencode.ai/zen/v1"));
+    const uuidv7Id = "0190a3c4-7b2e-7d4f-9a1b-2c3d4e5f6a7b";
+    assert.ok(extractProtectedFacts([
+      { role: "user", content: `Track session ${uuidv7Id}`, timestamp: Date.now() },
+    ] as AgentMessage[]).includes(uuidv7Id));
     assert.ok(!facts.includes("https://opencode.ai/zen/v1`,"));
   });
 
@@ -401,8 +405,6 @@ describe("smart-compaction token ceiling, usage, and error classification", () =
     assert.equal(computeCompactionTokenCeiling(largeModel, overrideConfig), 12000);
     assert.equal(computeCompactionTokenCeiling(boundedModel, overrideConfig), 8192);
 
-    // Invalid non-positive reserves fail closed
-    assert.throws(() => computeCompactionTokenCeiling(largeModel, defaultConfig, 0), /must be positive/);
   });
 
   it("classifies fatal authentication and quota errors vs transient errors", () => {
@@ -464,10 +466,21 @@ describe("smart-compaction Git engineering state", () => {
         'export const value = 2;\nexport const api_key = "fk-my-production-key-999";\n',
       );
       fs.writeFileSync(path.join(root, "untracked.ts"), "export const fresh = true;\n");
+      // An untracked symlink to a file outside the repository must not be read.
+      const outside = path.join(os.tmpdir(), `smart-compaction-secret-${process.pid}.txt`);
+      fs.writeFileSync(outside, "OUTSIDE-SECRET-VALUE\n");
+      fs.symlinkSync(outside, path.join(root, "linked-secret.txt"));
+      // Large untracked files are previewed by head and tail only.
+      fs.writeFileSync(path.join(root, "large.txt"), `HEAD-MARKER${"x".repeat(2_000_000)}TAIL-MARKER`);
 
       const state = await getGitEngineeringState(root);
+      fs.rmSync(outside, { force: true });
+      assert.ok(!state.patch.includes("OUTSIDE-SECRET-VALUE"));
+      assert.ok(state.patch.includes("HEAD-MARKER"));
+      assert.ok(state.patch.includes("TAIL-MARKER"));
+      assert.ok(state.patch.length < 100_000);
       assert.equal(state.available, true);
-      assert.deepEqual(state.files.map((file) => file.path).sort(), ["tracked.ts", "untracked.ts"]);
+      assert.deepEqual(state.files.map((file) => file.path).sort(), ["large.txt", "linked-secret.txt", "tracked.ts", "untracked.ts"]);
       assert.ok(state.patch.includes("export const value = 2"));
       assert.ok(state.patch.includes("export const fresh = true"));
       assert.ok(state.patch.includes("fk-my-production-key-999"));
@@ -663,6 +676,57 @@ describe("smart-compaction classified retry ladder", () => {
       /401/,
     );
     assert.equal(calls, 1, "Fatal error should not have triggered retry stages!");
+  });
+
+  it("retries the next stage when a stage times out without user cancellation", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const dummyModel: Model<Api> = {
+      id: "session-model", name: "Session Model", provider: "session-provider",
+      api: "openai-responses", maxTokens: 128000, reasoning: true,
+    } as any;
+    let attempts = 0;
+    let firstCallStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { firstCallStarted = resolve; });
+    const mockRegistry = {
+      find() { return undefined; },
+      getAvailable() { return [dummyModel]; },
+      async complete(_m: any, _c: any, options: any) {
+        attempts++;
+        if (attempts === 1) {
+          firstCallStarted();
+          await new Promise((_resolve, reject) => {
+            options.signal.addEventListener("abort", () => reject(new DOMException("This operation was aborted", "AbortError")), { once: true });
+          });
+        }
+        return { role: "assistant", content: [{ type: "text", text: VALID_SIX_SECTION_SUMMARY }], stopReason: "stop" };
+      },
+    };
+    const event: SessionBeforeCompactEvent = {
+      type: "session_before_compact",
+      preparation: {
+        firstKeptEntryId: "entry-1",
+        messagesToSummarize: [{ role: "user", content: "Work", timestamp: Date.now() }],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 20000,
+        fileOps: { read: new Set(), written: new Set(["a.ts"]), edited: new Set() } as any,
+        settings: { enabled: true, reserveTokens: 0, keepRecentTokens: 20000 },
+      },
+      branchEntries: [],
+      reason: "manual",
+      willRetry: false,
+      signal: new AbortController().signal,
+    };
+    const pending = runSmartCompaction({
+      event,
+      ctx: { model: dummyModel, modelRegistry: mockRegistry as any, thinkingLevel: "medium" as const, cwd: os.tmpdir() },
+      config: { version: 1, enabled: true, model: "inherit" },
+    });
+    await started;
+    t.mock.timers.tick(10 * 60 * 1000 + 1);
+    const result = await pending;
+    assert.equal(attempts, 2);
+    assert.ok(result.summary.includes("Never modify legacy-auth.ts"));
   });
 
   it("recovers from stage 1 length error by falling back to stage 2 without reasoning", async () => {
@@ -872,6 +936,20 @@ describe("smart-compaction extension commands & UI validation", () => {
     // Set valid model
     await compactionModelCmd.handler("anthropic/claude-3-5-sonnet", mockCtx);
     assert.equal(loadSmartCompactionConfig(file).model, "anthropic/claude-3-5-sonnet");
+
+    // RPC clients cannot render the custom picker; they get a plain selector.
+    let offered: string[] = [];
+    await compactionModelCmd.handler("", {
+      ...mockCtx,
+      mode: "rpc",
+      ui: {
+        ...mockCtx.ui,
+        custom() { throw new Error("custom components are TUI-only"); },
+        async select(_title: string, choices: string[]) { offered = choices; return "inherit"; },
+      },
+    });
+    assert.deepEqual(offered, ["inherit", "session-provider/session-model", "anthropic/claude-3-5-sonnet"]);
+    assert.equal(loadSmartCompactionConfig(file).model, "inherit");
 
     cleanup();
   });

@@ -5,6 +5,7 @@ import {
   ProjectTrustStore,
   SettingsManager,
   type AgentSession,
+  type InlineExtension,
   type SessionShutdownEvent,
 } from "@earendil-works/pi-coding-agent";
 
@@ -35,6 +36,8 @@ export interface ChildResourceOptions {
   projectTrusted: boolean;
   appendSystemPrompt?: string[];
   agentDir?: string;
+  /** Child-only extensions, such as a capability guard, loaded beside the normal ones. */
+  extensionFactories?: InlineExtension[];
 }
 
 /** Load normal global/package resources and trust-gated project resources. */
@@ -50,6 +53,7 @@ export async function createChildResources(options: ChildResourceOptions) {
     ...(options.appendSystemPrompt
       ? { appendSystemPrompt: options.appendSystemPrompt }
       : {}),
+    ...(options.extensionFactories ? { extensionFactories: options.extensionFactories } : {}),
   });
   await loader.reload();
   return { loader, settingsManager };

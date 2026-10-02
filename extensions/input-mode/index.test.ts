@@ -87,7 +87,7 @@ test("steer, interrupt, and follow-up modes preserve distinct input semantics", 
     assert.deepEqual(input({ ...event, images: [image] }, context), { action: "handled" });
     assert.deepEqual(app.sent.at(-1), {
       content: [{ type: "text", text: "new direction" }, image],
-      options: { deliverAs: "followUp" },
+      options: { deliverAs: "followUp", expandPromptTemplates: true },
     });
 
     assert.deepEqual(input({ ...event, source: "extension" }, context), { action: "continue" });
@@ -113,6 +113,17 @@ test("command validates direct input and exposes non-default mode status", async
 
     await app.commands.get("input-mode").handler("interrupt", commandContext);
     assert.equal(app.statuses.at(-1), "input: interrupt");
+
+    // A failed save leaves the live mode and its status unchanged.
+    fs.rmSync(fixture.file, { force: true });
+    fs.mkdirSync(fixture.file);
+    await app.commands.get("input-mode").handler("follow-up", commandContext);
+    assert.equal(app.statuses.at(-1), "input: interrupt");
+    assert.match(app.notices.at(-1)?.message ?? "", /Input mode unchanged \(interrupt\)/);
+    const input = app.hooks.get("input")!;
+    let aborts = 0;
+    input({ type: "input", text: "x", source: "interactive", streamingBehavior: "steer" }, { abort() { aborts += 1; } });
+    assert.equal(aborts, 1, "interrupt mode is still live");
     app.hooks.get("session_shutdown")?.();
     assert.equal(app.statuses.at(-1), undefined);
   } finally {
