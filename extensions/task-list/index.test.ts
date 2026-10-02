@@ -76,17 +76,20 @@ const initialTasks = [
   { id: "test", content: "Run focused tests", status: "pending" as const },
 ];
 
-test("registers a crystal-clear whole-list tool and /tasks command", () => {
+test("registers a whole-list tool, a narrow trigger, and /tasks", () => {
   const h = harness();
   const tool = h.tools.get("task_list");
   assert.ok(tool);
   assert.ok(h.commands.has("tasks"));
-  assert.match(tool.description, /COMPLETE replacement list/);
-  assert.match(tool.description, /SAME assistant message as the first action tool/);
-  assert.match(tool.description, /only when task-level state changes/);
-  assert.match(tool.description, /not after every file read, edit, command, or tool call/);
+  assert.equal(tool.exposure, "model-only");
+  assert.match(tool.description, /replaces the whole list/);
+  assert.match(tool.description, /together with the first real action/);
+  assert.match(tool.description, /only when a task finishes/);
   assert.match(tool.description, /Before the final response/);
-  assert.ok(tool.promptGuidelines.every((line: string) => line.includes("task_list")));
+  const guidance = tool.promptGuidelines.join("\n");
+  assert.match(guidance, /several separate deliverables/);
+  assert.match(guidance, /single objective directly/);
+  assert.doesNotMatch(guidance, /three distinct actions/);
 });
 
 test("writes, reads, persists, and summarizes the complete ordered list", async () => {
@@ -163,14 +166,14 @@ test("injects compaction-safe state without treating routine tools as task trans
   await h.emit("session_shutdown");
 });
 
-test("nudges a model that starts multi-action work without creating the list", async () => {
+test("never injects a reminder when work proceeds without a list", async () => {
   const h = harness();
   await h.emit("session_start", { reason: "startup" });
   await h.emit("input", { source: "interactive" });
-  await h.emit("tool_execution_start", { toolName: "read" });
-  await h.emit("tool_execution_start", { toolName: "grep" });
-  const result = await h.emit("context", { messages: [] });
-  assert.match(String(result.messages.at(-1).content), /started multi-action work without task_list/);
+  for (const toolName of ["read", "grep", "edit", "bash", "bash"]) {
+    await h.emit("tool_execution_start", { toolName });
+  }
+  assert.equal(await h.emit("context", { messages: [] }), undefined);
   await h.emit("session_shutdown");
 });
 

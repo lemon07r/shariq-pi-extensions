@@ -6,10 +6,6 @@ Small always-on quality-of-life features for local Pi.
 
 - `features/exit-alias.ts` — adds `/exit` as an alias for `/quit`.
 
-## Removed
-
-- `features/native-max-thinking.ts` was removed because Pi 0.80.7 supports `--thinking max` natively.
-
 ## When to add here
 
 Add tiny, low-risk workflow conveniences here when they do not deserve a standalone extension.

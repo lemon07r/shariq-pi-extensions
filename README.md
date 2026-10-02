@@ -1,6 +1,6 @@
 # Shariq's Pi extensions
 
-Cross-platform extensions and operating skills for the Pi coding agent. Credentials and runtime state stay on each machine and are never bundled with the package.
+Cross-platform extensions and skills for the [Pi](https://github.com/earendil-works/pi) coding agent. Credentials and runtime state stay on each machine and are never bundled with the package.
 
 ## Install
 
@@ -20,24 +20,22 @@ Run `/reload` in an existing Pi session after installation; new sessions load th
 
 ## Included extensions
 
-The package contains:
-
-- structured user questions
+- structured user questions (`ask_user`)
+- persistent goals with evidence checklists and budgets
+- a task list for multi-deliverable work, with a live progress dock
+- Pi subagents with profiles, worktree isolation, and a takeover dashboard
+- Smart Compaction: structured checkpoints with file and worktree state
 - managed background terminals
-- Firecrawl web and developer search plus scraping
-- persistent task goals
-- branch-safe model-maintained task lists with live progress UI and compaction continuity
-- configurable steer, interrupt, or follow-up input behavior
-- Smart Compaction with high-fidelity checkpointing, delta-merging, and custom model routing
-- per-response TPS, TTFT, elapsed-time, and output status
-- Context Usage display
-- small shell and command shortcuts
-- Pi subagents
+- Firecrawl web search, scraping, and developer search
 - lightweight URL fetching
+- Context Usage startup card
+- per-response TPS, time-to-first-token, and output status
+- configurable steer, interrupt, or follow-up Enter behavior
+- `/exit` as an alias for `/quit`
 
-The package also includes the `ember-warm-dark` TUI theme and declares the `background-terminals` and `subagents` skills so Pi loads their operating guidance automatically. Pi reads them from the installed package; duplicating files under `<agent-dir>/skills` is unnecessary and would leave stale copies after removal.
+The package also ships the `ember-warm-dark` theme and the `background-terminals` and `subagents` skills. Pi loads the skills from the installed package; copying them into `<agent-dir>/skills` would leave stale duplicates after removal.
 
-See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for commands, tools, configuration, and external dependencies.
+The suite is developed and tested against Pi 1.0. See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for commands, tools, configuration, and external dependencies.
 
 ## Enable or disable extensions
 

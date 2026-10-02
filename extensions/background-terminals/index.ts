@@ -149,21 +149,20 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
     name: "start_terminal",
     label: "Start Background Terminal",
     description:
-      "Start a command in a real background pseudo-terminal (PTY) and return its terminal id. " +
-      "Use for development servers, watchers, long builds, and commands that need terminal semantics. " +
-      "The PTY accepts later input through write_terminal, captures a bounded live tail in memory, writes a size-limited private temporary log, and is stopped at session shutdown. " +
-      `At most ${MAX_RUNNING_TERMINALS} terminals may run concurrently.`,
-    promptSnippet: "Start an interactive or long-running command in a managed background PTY.",
+      "Run a shell command in a background pseudo-terminal (PTY) and return its terminal id. " +
+      "The process keeps running while you work; when it exits, its final output arrives as a new message that starts your next turn. " +
+      `At most ${MAX_RUNNING_TERMINALS} terminals run at once, and all of them stop when the session ends.`,
+    promptSnippet: "Run a long or interactive command in a background PTY.",
     promptGuidelines: [
-      "Use start_terminal by default for servers, watchers, downloads, long or uncertain builds and tests, interactive shells, and any command that should not occupy the main turn; reserve bash for short commands whose result is needed immediately. Never use a large bash timeout merely to wait for long work.",
-      "After start_terminal returns, continue only genuinely independent work. If none remains, end the turn immediately. Terminal settlement stays in a private extension queue while the parent is active and starts one custom-result turn at Pi's safe idle edge. When that result invokes the parent, continue the original task immediately without waiting for the user or rereading the same terminal; do not call read_terminal, list_terminals, or start a timer merely to check whether it finished.",
-      "Use stop_terminal when a managed process is no longer needed. Background terminals are session-scoped and are stopped during session shutdown or reload.",
+      "Use start_terminal for servers, watchers, long builds or test runs, and interactive commands. Use bash for short commands whose output you need now, not with a long timeout.",
+      "After start_terminal, continue independent work or end the turn. When the terminal's result message arrives, continue the task from it instead of polling with read_terminal or list_terminals.",
     ],
+    exposure: "model-only",
     parameters: Type.Object({
-      command: Type.String({ minLength: 1, maxLength: 32_000, description: "Shell command to run in the PTY." }),
-      title: Type.Optional(Type.String({ maxLength: 100, description: "Short human-readable terminal name; defaults to the command." })),
-      working_dir: Type.Optional(Type.String({ description: "Working directory relative to the current workspace, or an absolute directory." })),
-      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000, description: "Optional initial wait for startup output; default 300ms." })),
+      command: Type.String({ minLength: 1, maxLength: 32_000, description: "Shell command." }),
+      title: Type.Optional(Type.String({ maxLength: 100, description: "Short name; defaults to the command." })),
+      working_dir: Type.Optional(Type.String({ description: "Directory, relative to the workspace or absolute." })),
+      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000, description: "Wait for startup output; default 300." })),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const command = params.command.trim();
@@ -229,14 +228,14 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
     name: "read_terminal",
     label: "Read Background Terminal",
     description:
-      "Read output from a managed background terminal only when the user asks for progress or current output is required for immediate interaction. " +
-      "Do not use it to wait for completion: terminal settlement automatically sends a follow-up that starts the next parent turn. " +
-      "Pass the cursor from the previous terminal result to receive only newer output. Output is tail-truncated for model context; the private log path is reported when available.",
-    promptSnippet: "Read new output from a managed background terminal by id and cursor.",
+      "Read a background terminal's output since a cursor; omit the cursor for the retained tail. " +
+      "Use it when the user asks for progress or the process is waiting for input. Completion output arrives on its own.",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: Type.Object({
-      id: Type.String({ description: 'Terminal id, for example "term-1".' }),
-      cursor: Type.Optional(Type.Integer({ minimum: 0, description: "Cursor returned by the previous terminal operation; omit for the retained tail." })),
-      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "Long-poll duration when no newer output exists; default 0." })),
+      id: Type.String({ description: 'Terminal id, such as "term-1".' }),
+      cursor: Type.Optional(Type.Integer({ minimum: 0, description: "Cursor from the previous terminal result." })),
+      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "Wait for new output; default 0." })),
     }),
     async execute(_toolCallId, params, signal) {
       const result = await getManager().read(params.id, {
@@ -271,15 +270,15 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
     name: "write_terminal",
     label: "Write Background Terminal",
     description:
-      "Send input to a running background PTY, optionally press Enter, wait briefly, and return output produced since the supplied cursor. " +
-      "Use input \\u0003 with press_enter=false to send Ctrl+C inside the PTY; use stop_terminal to terminate the managed process tree.",
-    promptSnippet: "Send input to a running background PTY and collect its response.",
+      "Send input to a running background terminal and return the output it produces. Enter is appended unless press_enter is false; " +
+      "send \\u0003 with press_enter=false for Ctrl+C. Use stop_terminal to end the process.",
+    exposure: "model-only",
     parameters: Type.Object({
       id: Type.String({ description: "Terminal id." }),
-      input: Type.String({ maxLength: 65_536, description: "Text or control character to write." }),
-      press_enter: Type.Optional(Type.Boolean({ description: "Append Enter after the input; default true." })),
-      cursor: Type.Optional(Type.Integer({ minimum: 0, description: "Previous output cursor for incremental output." })),
-      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000, description: "Wait for resulting output; default 250ms." })),
+      input: Type.String({ maxLength: 65_536, description: "Text or control characters." }),
+      press_enter: Type.Optional(Type.Boolean({ description: "Default true." })),
+      cursor: Type.Optional(Type.Integer({ minimum: 0, description: "Cursor from the previous terminal result." })),
+      wait_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 5_000, description: "Wait for output; default 250." })),
     }),
     async execute(_toolCallId, params, signal) {
       const current = getManager().get(params.id);
@@ -317,7 +316,9 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_terminals",
     label: "List Background Terminals",
-    description: "List managed background terminals with status, pid, elapsed time, output size, and working directory.",
+    description: "List background terminals with id, status, pid, elapsed time, and working directory.",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: Type.Object({}),
     async execute() {
       const terminals = getManager().list();
@@ -340,10 +341,11 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
   pi.registerTool({
     name: "stop_terminal",
     label: "Stop Background Terminals",
-    description: "Stop one or more managed background terminal process groups, escalating from SIGTERM to SIGKILL when needed, and return their final states.",
-    promptSnippet: "Stop managed background terminals and their process trees.",
+    description: "Stop background terminals by id (SIGTERM, then SIGKILL) and return their final status.",
+    exposure: "model-only",
+    annotations: { destructiveHint: true, openWorldHint: false },
     parameters: Type.Object({
-      ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32, description: "Terminal ids to stop." }),
+      ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
     }),
     async execute(_toolCallId, params) {
       const terminals = await getManager().kill(params.ids);

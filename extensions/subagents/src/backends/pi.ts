@@ -18,13 +18,7 @@ import type {
   ModelRegistry,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  getAgentDir,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import type { Cause, Scope } from "effect";
 import { Effect, Queue, Stream } from "effect";
 import { Type } from "typebox";
@@ -36,9 +30,14 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import {
+  CHILD_EXCLUDED_TOOL_NAMES,
+  createChildResources,
+  shutdownAndDisposeChildSession,
+} from "../../../shared/child-session.ts";
+import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
-const CHILD_TOOL_CALL_TIMEOUT_MS = 3 * 60 * 1_000;
 
 function capabilityExclusions(capability: SpawnTask["capability"]): string[] {
   switch (capability) {
@@ -95,21 +94,6 @@ export function filterToolsForCapability(
     return false;
   });
 }
-
-/** Tools that headless children must not receive. Everything else stays enabled. */
-const CHILD_EXCLUDED_TOOL_NAMES = [
-  "spawn_agent",
-  "wait_agent",
-  "close_agent",
-  "check_agent",
-  "list_agents",
-  "send_message",
-  "apply_agent_changes",
-  "task",
-  "reply_question",
-  "workflow",
-  "ask_user",
-] as const;
 
 // --- Model + effort resolution -----------------------------------------------
 
@@ -219,115 +203,16 @@ export function resolvePiModel(
   throw new Error(`Unknown model "${hint}".`);
 }
 
-// --- Child session helpers (ported from v1 shared/child-session.ts) -----------
-
-/** Load normal global/package resources and trust-gated project resources. */
-async function createChildResources(cwd: string, projectTrusted: boolean) {
-  const agentDir = getAgentDir();
-  const settingsManager = SettingsManager.create(cwd, agentDir, {
-    projectTrusted,
-  });
-  const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
-  await loader.reload();
-  return { loader, settingsManager };
-}
-
 function waitBounded(operation: Promise<unknown>, timeoutMs: number) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, timeoutMs);
   });
-  return Promise.race([
-    operation.then(
-      () => undefined,
-      () => undefined,
-    ),
-    timeout,
-  ])
+  return Promise.race([operation.then(() => undefined, () => undefined), timeout])
     .catch(() => {})
     .finally(() => {
       if (timer) clearTimeout(timer);
     });
-}
-
-/** Emit child session_shutdown (bounded), then dispose. Never throws. */
-async function shutdownAndDisposeChildSession(session: AgentSession) {
-  try {
-    if (session.extensionRunner.hasHandlers("session_shutdown")) {
-      await waitBounded(
-        session.extensionRunner.emit({
-          type: "session_shutdown",
-          reason: "quit",
-        }),
-        CHILD_SHUTDOWN_TIMEOUT_MS,
-      );
-    }
-  } catch {
-    // Extension runner inspection/emission is best-effort during teardown.
-  } finally {
-    try {
-      session.dispose();
-    } catch {
-      // Disposal is terminal and must remain idempotent for callers.
-    }
-  }
-}
-
-// --- Tool-call timeout guard (ported from v1 shared/tool-call-timeout.ts) -----
-
-/**
- * Wrap every registered child tool with an independent execution timeout so a
- * hung tool cannot wedge a headless child forever. apply() is idempotent and
- * re-applied on agent_start to pick up tools registered between runs.
- */
-function createToolCallTimeoutGuard(timeoutMs = CHILD_TOOL_CALL_TIMEOUT_MS) {
-  const wrapped = new WeakSet<ToolDefinition>();
-
-  const wrap = (definition: ToolDefinition) => {
-    if (wrapped.has(definition)) return;
-    wrapped.add(definition);
-    const execute = definition.execute;
-    definition.execute = async (toolCallId, params, signal, onUpdate, ctx) => {
-      const timeoutController = new AbortController();
-      const executionSignal = signal
-        ? AbortSignal.any([signal, timeoutController.signal])
-        : timeoutController.signal;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          const error = new Error(
-            `Tool call "${definition.name}" timed out after ${Math.round(timeoutMs / 60_000)} minutes.`,
-          );
-          reject(error);
-          timeoutController.abort(error);
-        }, timeoutMs);
-      });
-      try {
-        return await Promise.race([
-          execute.call(
-            definition,
-            toolCallId,
-            params,
-            executionSignal,
-            onUpdate,
-            ctx,
-          ),
-          timeout,
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    };
-  };
-
-  return {
-    apply(session: AgentSession) {
-      for (const { name } of session.getAllTools()) {
-        const definition = session.getToolDefinition(name);
-        if (definition) wrap(definition);
-      }
-    },
-  };
 }
 
 // --- Event translation ----------------------------------------------------------
@@ -465,10 +350,10 @@ const makePiSession = (
 
     const session = yield* Effect.tryPromise({
       try: async () => {
-        const { loader, settingsManager } = await createChildResources(
-          task.cwd,
-          task.parent.projectTrusted,
-        );
+        const { loader, settingsManager } = await createChildResources({
+          cwd: task.cwd,
+          projectTrusted: task.parent.projectTrusted,
+        });
         const sessionManager = task.resumeSessionFile
           ? SessionManager.open(task.resumeSessionFile, undefined, task.cwd)
           : SessionManager.create(task.cwd, undefined, {

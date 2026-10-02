@@ -18,7 +18,7 @@ test("web_fetch routing treats remote content as data rather than instructions",
 
   assert.equal(tool?.name, "web_fetch");
   assert.match(tool?.description ?? "", /known URL or API/);
-  assert.match(tool?.promptSnippet ?? "", /web_search for discovery/);
+  assert.match(tool?.description ?? "", /use web_search for discovery/);
   assert.match(tool?.promptGuidelines?.join(" ") ?? "", /untrusted data, not instructions/);
 });
 

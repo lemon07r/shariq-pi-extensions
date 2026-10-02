@@ -531,7 +531,6 @@ ${progress}
 
 Execution:
 - Treat the current worktree and external state as authoritative; inspect live state before relying on prior context. Improve, replace, or remove existing work as needed.
-- For meaningful multi-step work, keep a concise current plan when a planning tool exists. Skip planning for trivial work; planning is not execution.
 - Optimize each turn for movement toward the requested final state, not an easier passing subset.
 - Each automatic continuation must make tool-backed progress, complete the goal, or satisfy the blocked gate. A narration-only turn suppresses further automatic continuation until the user resumes or steers the goal.
 
@@ -901,8 +900,8 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		name: "get_goal",
 		label: "Get Goal",
 		description: "Get this session's goal status, progress checklist, continuation state, budget, token use, and elapsed time.",
-		promptSnippet: "Read the active long-running goal and usage.",
-		promptGuidelines: ["Use get_goal to inspect the active goal state."],
+		exposure: "model-only",
+		annotations: { readOnlyHint: true, openWorldHint: false },
 		parameters: Type.Object({}),
 		async execute() {
 			return {
@@ -916,8 +915,9 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		name: "create_goal",
 		label: "Create Goal",
 		description: "Create a persistent goal only when explicitly requested by the user or system/developer instructions. Set token_budget only when explicitly requested. Fails while an unfinished goal exists; a completed goal may be replaced. Use update_goal only for status.",
-		promptSnippet: "Create an explicitly requested long-running goal.",
-		promptGuidelines: ["Never infer a persistent goal from an ordinary task; create one only on explicit request."],
+		promptSnippet: "Track an explicitly requested long-running goal.",
+		promptGuidelines: ["Create a goal only when the user or system instructions explicitly ask for one; an ordinary task is not a goal."],
+		exposure: "model-only",
 		parameters: Type.Object({
 			objective: Type.String({ description: "Concrete objective to pursue." }),
 			token_budget: Type.Optional(Type.Integer({ minimum: 1, description: "Positive token budget; set only when explicitly requested." })),
@@ -946,11 +946,8 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 	pi.registerTool({
 		name: "update_goal_progress",
 		label: "Update Goal Progress",
-		description: "Create or update the active goal's checklist and evidence ledger. Use stable item ids. Mark an item complete only with concrete evidence; use blocked only for a specific unresolved dependency. Omitted existing items are retained.",
-		promptSnippet: "Maintain the active goal's progress checklist and evidence.",
-		promptGuidelines: [
-			"Use update_goal_progress for meaningful multi-step goals. Keep checklist status and evidence current, but do not treat the checklist itself as proof that the goal is complete.",
-		],
+		description: "Create or update the active goal's checklist and evidence ledger for multi-step goals. Use stable item ids; omitted items are kept. Mark an item complete only with concrete evidence, and blocked only for a specific unresolved dependency. The checklist guides the work but does not prove the goal is complete.",
+		exposure: "model-only",
 		parameters: Type.Object({
 			items: Type.Array(
 				Type.Object({
@@ -1015,8 +1012,7 @@ Status is budget_limited. Start no new substantive work; promptly summarize prog
 		name: "update_goal",
 		label: "Update Goal",
 		description: "Mark a goal complete only after every requirement is verified, or blocked only after the same blocker persists for three consecutive goal turns and progress requires user input/external change. Hard, slow, uncertain, or incomplete work is not blocked. Only the user/system controls pause and limits.",
-		promptSnippet: "Mark a verified-complete or strictly blocked goal.",
-		promptGuidelines: ["Use update_goal only after the completion gate or three-turn blocked gate is satisfied."],
+		exposure: "model-only",
 		parameters: Type.Object({
 			status: Type.String({ enum: ["complete", "blocked"], description: "complete: every requirement verified. blocked: same blocker for 3 turns and external/user change required." }),
 		}),

@@ -1,80 +1,61 @@
 # Extension catalog
 
-Last verified: 2026-09-04
+Each extension's README covers its full behavior. This page is the short version.
 
 ## Agent workflow
 
 ### [Structured questions](../extensions/ask-user/README.md)
 
-`ask_user` presents one blocking multiple-choice decision with an optional custom answer. It is intended for decisions that cannot be resolved safely from available context.
+`ask_user` shows one multiple-choice decision, with an optional written answer, when a missing user choice blocks safe progress. Outside the TUI it reports that no interactive answer is available.
 
 ### [Goals](../extensions/goal/README.md)
 
-The goal extension adds persistent, branch-safe objectives, progress evidence, budgets, pause/resume controls, and strict completion/blocker gates. Use `/goal` for the operator UI and the `create_goal`, `get_goal`, `update_goal_progress`, and `update_goal` tools for agent-controlled state.
+Persistent, branch-safe objectives with an evidence checklist, token budgets, pause and resume, automatic continuation, and strict completion and blocker gates. `/goal` opens the control center; the model uses `create_goal`, `get_goal`, `update_goal_progress`, and `update_goal`. Goals are created only on explicit request.
 
 ### [Task List](../extensions/task-list/README.md)
 
-`task_list` gives the active model a branch-safe ordered checklist for ordinary multi-step work; it is separate from persistent Goals and may be used alongside them. Writes replace the full list, retain stable IDs, support pending/in-progress/completed/blocked/cancelled states and priorities, and require an active item while pending work remains. The prompt contract requires same-message list/action calls and verified updates only at task-level transitions—not after routine file reads, edits, commands, or other tool calls. A runtime reminder catches multi-action work that starts without a list; final reconciliation catches unfinished bookkeeping.
-
-State is stored in Pi session entries and reconstructed on resume, reload, and tree navigation. Active work is re-injected when compaction removes the latest snapshot from model context. `/tasks` opens the interactive dashboard and direct editor; the compact live widget auto-hides after all work finishes. Subagents receive the same tool under every capability policy, but each child maintains its own session-local list rather than changing the parent's list.
+`task_list` keeps a branch-safe checklist for requests with several separate deliverables, long multi-phase work, or an explicit request for a plan. Single-objective work goes ahead without a list, and the extension never prompts the model to create one. When compaction removes the latest list from context, the unfinished items are added back. `/tasks` opens the dashboard and editor. Task List is independent of Goals and can run alongside one.
 
 ### [Subagents](../extensions/subagents/README.md)
 
-The subagent extension runs flat Pi child agents with profiles, capability policies, continuation, result delivery, optional worktrees, pre-warmed task dispatch, instant cascading cancellation, cross-session persistence, and a dashboard. Configuration lives in `<agent-dir>/subagents.json`; trusted projects may override it through their Pi config directory. The configured concurrency ceiling is 50.
-
-The extension supplies tools including `spawn_agent`, `task`, `check_agent`, `list_agents`, `wait_agent`, `send_message`, `close_agent`, `reply_question`, and `apply_agent_changes`. These lifecycle operations render as compact expandable main-chat cards; only active manager entries contribute to the bounded Active work dock, while workflow progress is intentionally omitted from the footer so persisted history cannot inflate or duplicate live status. Cancellation and reload interruption use a distinct `cancelled` state rather than `error`. All completed and cancelled production subagent snapshots and transcripts persist across Pi restarts (`<agent-dir>/subagents/runs/`), allowing `resume_from` to resume completed workers at any point. Interruption immediately cascades across all child fibers in `<10ms`. Child settlement stays in a private extension queue while the parent is active, then starts one custom-result turn at Pi's safe idle edge with the summary guaranteed in model context and never rendered as user-authored or follow-up input; status tools are for explicit inspection, not waiting.
+Flat Pi child agents with profiles, capability policies, context forks, resumable sessions, optional git worktree isolation, peer messaging, and a takeover dashboard. Children cannot start agents. The model delegates only when the user asks. Results are delivered as custom messages that start a parent turn when the parent is idle. Configuration lives in `<agent-dir>/subagents.json`, with trusted-project overrides in `.pi/subagents.json`.
 
 ### [Smart Compaction](../extensions/smart-compaction/README.md)
 
-Replaces standard context compaction with a defensive, high-fidelity continuity engine. It intercepts `session_before_compact` events and synthesizes multi-turn conversations into structured checkpoint summaries capturing primary goals and negative constraints, progress ledgers (`Done`/`In Progress`/`Blocked`), verbatim code snippets for active/uncommitted edits, exact error root causes, architectural decisions, resume anchors, and deterministic file/diff state.
-
-Key capabilities include:
-- **Fail-Closed Validation**: Strictly enforces `stopReason === "stop"`, rejects tool calls and length-truncated output, and requires all 6 section headings.
-- **Deterministic State Ledger (Schema v3)**: Machine-readable tracking of `touchedReadFiles`, `touchedModifiedFiles`, and asynchronous NUL-delimited Git worktree parsing capturing `activeDirtyFiles`, staged diffs, unstaged diffs, and untracked file previews in `CompactionEntry.details` and `<uncommitted-diff>` context.
-- **Lockfile & Bundle Diff Filtering**: Automatically isolates `package-lock.json`, `Cargo.lock`, `yarn.lock`, and minified assets from raw diffs to preserve token budgets for source code logic.
-- **Active Background Terminal Awareness**: Automatically identifies running background processes and records them under `<active-background-processes>` to prevent duplicate server launches.
-- **Hierarchical Delta-Merging & Protected-Fact Validation**: Carries forward goals and constraints, extracts negative instructions and opaque identifiers into an explicit protected-facts ledger, and rejects summaries that omit them.
-- **Closed-Record Execution Guard & Zero-Chatter Resumption**: Marks historical tasks as closed milestones to prevent accidental re-execution of completed actions, and injects a resumption directive to immediately execute the next step without conversational chatter.
-- **Classified Retry Ladder**: Distinguishes non-retryable fatal auth/quota errors from transient reasoning/length limits (retrying with reasoning off) and falling back to the active session model.
-- **Tool-Aware Bounded Serialization**: Cleans terminal control/progress noise, preserves line-safe head and tail excerpts, prioritizes failures and mutations, and bounds large write/edit arguments without modifying active session history.
-- **Selectable Threshold Policy**: Supports percentage, hard-token, and hybrid safeguards; hybrid defaults to the earlier of 95% or 400,000 tokens without changing model catalogue context windows. Pi's native reserve-token threshold may still compact earlier.
-- **Engineering-State Coverage & Telemetry**: Keeps a complete changed-file inventory before allocating bounded per-patch excerpts, and records source/serialized/summary sizes, retries, and duration in compaction details.
-- **Custom Model Routing**: `/compaction-model` selects any custom compaction model (e.g. `anthropic/claude-3-5-sonnet`, `openai/gpt-4o`) or defaults to inheriting the active session model (`inherit`). `/smart-compaction` manages settings stored in `<agent-dir>/smart-compaction.json`.
+Replaces Pi's compaction summary with a six-section checkpoint plus computed file, worktree, and background-terminal state. Summaries that are truncated, incomplete, or drop protected identifiers are rejected or repaired; if every retry fails, compaction is cancelled instead of falling back to a weaker summary. An optional percent, hard, or hybrid threshold (default: 95% or 400,000 tokens, whichever is first) adds an upper bound to Pi's own trigger. `/compaction-model` and `/smart-compaction` manage `<agent-dir>/smart-compaction.json`.
 
 ### [Background terminals](../extensions/background-terminals/README.md)
 
-Managed PTYs support servers, watchers, long builds, downloads, and interactive processes. The extension tracks up to eight concurrent terminals, retains bounded output, stores full logs in restrictive temporary directories, and stops process groups during shutdown or reload.
-
-Its tools are `start_terminal`, `read_terminal`, `write_terminal`, `list_terminals`, and `stop_terminal`. All use compact expandable main-chat cards, while running PTYs share the bounded Active work dock with elapsed time and a latest-output preview. A model-started terminal keeps completion or failure in a private extension queue while the parent is active, then starts one custom-result turn at Pi's safe idle edge with bounded output guaranteed in model context and never rendered as user-authored or follow-up input. Reading a terminal does not suppress that delivery; agents should inspect only for explicit progress requests or immediate interaction.
+Managed PTYs for servers, watchers, long builds, and interactive programs: up to eight at once, bounded output in memory, private size-limited logs, and process-group shutdown on reload or exit. The model uses `start_terminal`, `read_terminal`, `write_terminal`, `list_terminals`, and `stop_terminal`; `/term` and `/ps` open the control center. When a model-started terminal exits, its result arrives as a custom message instead of requiring the model to poll.
 
 ## Web access
 
 ### [Firecrawl web](../extensions/firecrawl-web/README.md)
 
-`web_search` discovers current web, news, images, GitHub, research, and PDF sources. `web_scrape` renders difficult or JavaScript-heavy pages. `dev_search` queries the Firecrawl Developer Index across 70M+ technical docs, GitHub issues, merged PRs, and READMEs with matched code passages. Authentication resolves from environment variables, the active Pi agent `.env`, or Firecrawl CLI credentials.
+`web_search` finds web, news, image, GitHub, research, and PDF results. `web_scrape` extracts rendered or JavaScript-heavy pages. `dev_search` searches the Firecrawl Developer Index of technical docs, GitHub issues, pull requests, and READMEs. Credentials come from the environment, `<agent-dir>/.env`, or the Firecrawl CLI login.
 
 ### [Web fetch](../extensions/web-fetch/README.md)
 
-`web_fetch` retrieves a known HTTP or HTTPS URL without spending Firecrawl credits. It supports Markdown, text, and HTML output with bounded time and response size.
+`web_fetch` retrieves one known HTTP or HTTPS URL as Markdown, text, or HTML, with time and size limits and no Firecrawl credits.
 
-## Interface and quality of life
+## Interface
 
 ### [Context Usage](../extensions/context-usage/README.md)
 
-Displays the estimated prompt and session contribution to the active context window. The default summary is a compact context-budget card; use `Ctrl+O` or `/context-usage` to cycle to compact and expanded audit views.
+A startup card estimating how much of the context window the system prompt, `AGENTS.md` files, skill index, tools, and session take. `Ctrl+O` or `/context-usage` cycles summary, compact, and expanded views.
 
 ### [Performance status](../extensions/performance-status/README.md)
 
-Adds a responsive footer-area status row while each assistant message is active and for an eight-second completion linger, then clears it to avoid permanent footer noise. Live TPS/output are marked as estimates; final TPS uses conventional decode throughput from first streamed token to message completion. TTFT and total elapsed time separately expose provider latency, prefill, and hidden reasoning; output tokens and active tools remain separate.
+A status row for the current response with TPS, time to first token, elapsed time, output tokens, and the running tool. Live values are estimates; it clears eight seconds after the response ends.
 
 ### [Input mode](../extensions/input-mode/README.md)
 
-`/input-mode` chooses what ordinary Enter does while Pi is running: steer before the next model step, interrupt the active run, or wait as a follow-up. The global selection lives in `<agent-dir>/input-mode.json`; explicit Alt+Enter follow-ups and non-interactive inputs retain native behavior. Pi does not expose extension rows in core `/settings`, so this is a dedicated extension settings picker rather than a private TUI patch.
+`/input-mode` sets what Enter does while the agent runs: `steer` (default) queues the message before the next model step, `interrupt` aborts the run and resends the message, and `follow-up` waits until the run ends. The setting lives in `<agent-dir>/input-mode.json`.
 
 ### [Shell shortcuts](../extensions/shell-shortcuts/README.md)
 
-Adds `/exit` as an alias for Pi's normal quit command. Keep this extension limited to small, low-risk conveniences.
+Adds `/exit` as an alias for `/quit`.
 
-## Per-extension details
+## Tool exposure
 
-Implementation-specific behavior and maintenance notes remain next to each extension in its own README. Package-wide installation, dependencies, state boundaries, and release rules belong in the root documentation.
+Pi 1.0 lets each tool choose how the model reaches it. Tools that ask the user, manage lifecycles, or change session state (questions, goals, task list, terminals, subagents) use `model-only` exposure: they stay declared to the model even with `codemode.mode: "only"`, and codemode scripts cannot call them. The read-only web tools keep the default `direct` exposure so scripts can call them in parallel. Read-only tools also declare `readOnlyHint` annotations for permission extensions.

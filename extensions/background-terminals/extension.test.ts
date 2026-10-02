@@ -41,23 +41,22 @@ test("registers the PTY tool surface, control-center commands, and lifecycle cle
 
   const start = tools.get("start_terminal");
   assert.match(start.description, /pseudo-terminal \(PTY\)/);
+  assert.match(start.description, /arrives as a new message that starts your next turn/);
   const guidelines = start.promptGuidelines.join("\n");
-  assert.match(guidelines, /Use start_terminal by default/);
-  assert.match(guidelines, /Never use a large bash timeout/);
-  assert.match(guidelines, /end the turn immediately/);
-  assert.match(guidelines, /private extension queue/);
-  assert.match(guidelines, /custom-result turn/);
-  assert.match(guidelines, /continue the original task immediately/);
-  assert.match(guidelines, /do not call read_terminal, list_terminals, or start a timer/);
+  assert.match(guidelines, /Use start_terminal for servers/);
+  assert.match(guidelines, /not with a long timeout/);
+  assert.match(guidelines, /end the turn/);
+  assert.match(guidelines, /instead of polling with read_terminal or list_terminals/);
   assert.match(JSON.stringify(start.parameters), /working_dir/);
 
   const read = tools.get("read_terminal");
-  assert.match(read.description, /only when the user asks for progress or current output is required for immediate interaction/);
+  assert.match(read.description, /when the user asks for progress or the process is waiting for input/);
+  assert.match(read.description, /Completion output arrives on its own/);
   for (const tool of tools.values()) {
+    assert.equal(tool.exposure, "model-only", `${tool.name} should stay declared to the model`);
     assert.equal(typeof tool.renderCall, "function", `${tool.name} should render a compact call card`);
     assert.equal(typeof tool.renderResult, "function", `${tool.name} should render a compact result card`);
   }
-  assert.match(read.description, /automatically sends a follow-up/);
 
   const write = tools.get("write_terminal");
   assert.match(write.description, /Ctrl\+C/);

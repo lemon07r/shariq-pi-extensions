@@ -10,7 +10,9 @@ Session-scoped background pseudo-terminals for Pi. The extension combines Codex-
 - `list_terminals` — list running and settled terminals.
 - `stop_terminal` — stop complete process groups with TERM-to-KILL escalation.
 
-Each output response carries a byte cursor. Pass it to the next read/write operation to avoid repeating output. Terminal lifecycle tools render as compact main-chat cards with expandable output, and running terminals appear in the shared bounded **Active work** dock with elapsed time and the latest output line. Long or uncertain commands should use `start_terminal` instead of a large blocking `bash` timeout. Settlement stays in a private extension queue while the parent is active, then starts one custom-result turn at Pi's safe idle edge with bounded output guaranteed in model context and never rendered as user-authored or follow-up input, so the parent can continue other work or end its turn rather than poll.
+Each output response carries a byte cursor; pass it to the next read or write to get only new output. The tools render as compact cards with expandable output, use `model-only` exposure, and running terminals appear in the shared **Active work** dock with elapsed time and the latest output line.
+
+When a model-started terminal exits, its status and a bounded output tail are delivered as a custom message. An idle parent starts a new turn for it; a busy parent receives it, together with any other pending results, when its run settles. The message never appears as user-authored or follow-up input, and reading the terminal does not suppress it.
 
 ## User interface
 
@@ -34,10 +36,4 @@ Each output response carries a byte cursor. Pass it to the next read/write opera
 - Output is sanitized before TUI or model rendering.
 - Processes run in their own PTY process group and are stopped on session shutdown, replacement, or reload.
 - Shutdown and stop operations are bounded and escalate from SIGTERM to SIGKILL.
-- Model-started terminals immediately hand one model-visible completion/failure follow-up to Pi; Pi queues it while the parent is active or starts the next parent turn when idle.
-- Reading settled output does not consume or suppress the automatic completion delivery.
-- Completion delivery is keyed by terminal id to prevent duplicate follow-ups.
-
-## Validation
-
-From the repository root, run `npm run validate`.
+- Completion delivery is keyed by terminal id, so each terminal produces at most one result message.

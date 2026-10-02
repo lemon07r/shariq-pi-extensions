@@ -1,50 +1,54 @@
 # Pi subagents
 
-A Pi-only subagent system with an Effect-managed lifecycle, persistent child sessions, configurable profiles, context forks, cross-session resumability, pre-warmed dispatch, instant cascading cancellation, worktree isolation, and a live takeover dashboard.
+Pi-only child agents with an Effect-managed lifecycle, persistent child sessions, configurable profiles, context forks, resumable runs, optional worktree isolation, and a live dashboard.
 
 ## Topology
 
-The system is deliberately flat. Only the main Pi thread can spawn subagents. Children may list and message existing peers through the main-thread manager, but they do not receive spawn, agent-management, or workflow tools. This permits collaboration without recursive fan-out or runaway agent trees.
-
-## High-Performance & Reliability Architecture
-
-- **Pre-Warmed Pool Dispatch:** Pre-warms unique agent IDs and allocation buffers ahead of time, eliminating string-formatting and crypto overhead on the critical path for sub-millisecond task dispatch.
-- **Instant Cascading Cancellation:** Structured Effect-TS fiber supervision cascades immediate abort signals to all running subagents and child processes in `<10ms`, guaranteeing zero orphan processes upon interruption or parent turn cancellation.
-- **Cross-Session Snapshot Persistence:** Full production subagent snapshots and transcripts are automatically persisted under `~/.pi/agent/subagents/runs/<id>/snapshot.json`, enabling discovery and resumption (`resume_from`) across Pi restarts. Test-only manager backends do not write into user state.
+Only the main Pi session starts subagents. Children can list and message existing peers through the main session's manager, but they never receive spawn, management, or batch tools, so agents cannot start agents.
 
 ## Parent tools
 
-- `spawn_agent` — start a background child with an optional profile, persona, capability mode, context fork, model override, or isolated worktree
-- `wait_agent` — collect results already available and report running children as pending without blocking
-- `close_agent` — interrupt children while retaining their transcripts
-- `check_agent` — inspect live activity without waiting
-- `list_agent_profiles` — discover active profiles, personas, defaults, and concurrency
-- `list_agents` — list live and globally archived/resumable children
-- `send_message` — steer a running child or start its next turn
-- `apply_agent_changes` — inspect, patch, cherry-pick, merge, or discard an isolated child worktree
-- `reply_question` — answer a child’s blocking `ask_parent` request
-- `task` — atomically reserve capacity for up to the configured limit (maximum 50), start the fan-out in the background, and return child ids immediately
+- `spawn_agent`: start one background child, optionally with a profile, persona, capability, context fork, model override, or isolated worktree. `resume_from` continues a finished child.
+- `task`: start a batch of up to `maxConcurrent` children. Capacity is reserved for the whole batch, or none of it starts.
+- `send_message`: steer a running child or start the next turn of an idle one.
+- `wait_agent`: collect results that are already available; running children are listed as pending. It never blocks.
+- `check_agent`: show one child's status and latest output.
+- `list_agents`: list live and archived resumable children.
+- `list_agent_profiles`: list profiles, personas, defaults, and the concurrency limit.
+- `close_agent`: stop running children and keep their transcripts.
+- `reply_question`: answer a child's blocking `ask_parent` question.
+- `apply_agent_changes`: inspect, patch, cherry-pick, merge, or discard an isolated child's worktree.
 
-Child sessions receive `message_parent`, `ask_parent`, `list_peers`, and `message_peer`. Peer messages are routed through the main-thread manager and can steer a running child or continue a settled one; they cannot create agents. Child settlement stays in a private extension queue while the parent is active, then starts one custom-result turn at Pi's safe idle edge with the summary guaranteed in model context and never rendered as user-authored or follow-up input, so the main turn can continue independent work or end and remain available to the user.
+All parent tools use `model-only` exposure, so codemode scripts cannot call them.
+
+The tool guidance tells the model to delegate only when the user asks for delegation or parallel work.
+
+Children receive `message_parent`, `ask_parent`, `list_peers`, and `message_peer`. Peer messages go through the main session's manager and can steer a running child or continue an idle one.
+
+## Result delivery
+
+A child's result is delivered to the parent as a custom message. If the parent is idle, the message starts a new parent turn. If the parent is busy, results wait in a private queue and are delivered together when the parent's run settles, with only the last one starting a turn. They never appear as user-authored or follow-up input. Background Terminals uses the same queue.
 
 ## Profiles and capabilities
 
 Built-in profiles:
 
-- `general-purpose` — unrestricted coding worker
-- `explore` — investigation with read and command execution, but no file edits
-- `plan` — investigation followed by a concrete implementation plan, with no file edits
+- `general-purpose`: full access;
+- `explore`: investigation with reads and command execution, no file edits;
+- `plan`: investigation that ends in an implementation plan, no file edits.
 
 Capability modes:
 
-- `read-only` — allowlisted read/search and parent-communication tools only
-- `read-write` — the read-only allowlist plus direct file write/edit tools, without shell execution
-- `execute` — the read-only allowlist plus shell and background-terminal execution, without direct file edit tools
-- `all` — full child tool access
+- `read-only`: allowlisted read and search tools plus parent communication;
+- `read-write`: the read-only set plus `write` and `edit`, without shell execution;
+- `execute`: the read-only set plus `bash` and background terminals, without direct edits;
+- `all`: every tool the child loads.
 
-Restrictive modes fail closed: newly registered extension tools remain unavailable until they are explicitly classified. This prevents another extension from silently bypassing the selected capability. The session-only `task_list` planning tool is explicitly classified as safe in every capability mode, so each child can maintain its own task list without receiving file-write or command-execution authority.
+Restrictive modes fail closed: an extension tool is unavailable until it is classified in `src/backends/pi.ts`. The session-only `task_list` tool is allowed in every mode.
 
-Optional user profiles and personas can be defined in `~/.pi/agent/subagents.json`. Trusted projects may override them in `.pi/subagents.json`:
+Each tool call inside a child times out after three minutes.
+
+User profiles and personas live in `<agent-dir>/subagents.json`. Trusted projects can override them in `.pi/subagents.json`:
 
 ```json
 {
@@ -64,31 +68,38 @@ Optional user profiles and personas can be defined in `~/.pi/agent/subagents.jso
 }
 ```
 
-Project configuration is ignored when the project is not trusted. Concurrency is bounded to 1–50; this suite defaults to 50. `/subagents profiles` provides discovery, while `/subagents config` opens a validated editor for global or trusted-project configuration.
+Project configuration is ignored for untrusted projects. `maxConcurrent` is bounded to 1–50 and defaults to 50. `/subagents profiles` lists profiles, and `/subagents config` opens a validated editor for the global or trusted-project file.
 
 ## Context and continuation
 
-New children start with independent context by default. `fork_turns` may be `all` or a positive number of recent user turns. Forking keeps user messages and final assistant text while removing thinking, tool calls, and tool results so the child never inherits an unresolved tool protocol.
+New children start without parent context. `fork_turns` can be `all` or a positive number of recent user turns; the fork keeps user messages and final assistant text and drops thinking, tool calls, and tool results.
 
-Every child uses a persistent Pi session file. `resume_from` continues a completed or cancelled child with its full transcript, tool state, and logical agent id, including after a parent `/reload` or resume. Cancellation and reload interruption are recorded as `cancelled`, not as failures; historical snapshots remain discoverable but only active manager entries contribute to the live footer and Active work dock. Non-secret metadata is stored both in the parent session and in `~/.pi/agent/subagents/catalog.json`, so children created by an ephemeral or different parent process remain discoverable. Existing legacy ids remain valid catalog keys.
+Every child has a persistent Pi session file. `resume_from` continues a finished or cancelled child with its transcript, tool state, and id, including after a parent reload or restart. A run interrupted by cancellation or reload is recorded as `cancelled`, not as a failure.
+
+Non-secret metadata is stored in the parent session and in `<agent-dir>/subagents/catalog.json`, so children started by another Pi process stay discoverable. Final snapshots are saved under `<agent-dir>/subagents/runs/<id>/snapshot.json`. Only live children appear in the Active work dock.
 
 ## Worktree isolation
 
-Children share the requested workspace by default. Use `isolation: "worktree"` only when the user requests it, a configured profile requires it, or concurrent write tasks are likely to overlap or interfere. Read-only work and edits to clearly separate areas should stay in the shared workspace.
+Children share the workspace by default. `isolation: "worktree"` needs a clean source checkout. It creates a branch and a persistent git worktree from `HEAD` under `<agent-dir>/subagent-worktrees/`. A dirty source is rejected rather than giving the child stale code.
 
-`isolation: "worktree"` requires a clean source checkout, then creates a dedicated branch and persistent git worktree from `HEAD` under `~/.pi/agent/subagent-worktrees/`. A dirty source is rejected rather than silently giving the child stale code; commit or stash first, or use the shared workspace. `apply_agent_changes` supports `inspect`, checked patch application, commit-preserving cherry-pick, merge, and permanent discard. Cherry-pick and merge first run in a temporary worktree; conflicts leave the source checkout unchanged. Discard requires confirmation in interactive mode. A failed spawn removes the worktree it created; completed worktrees remain available for inspection or continuation.
+`apply_agent_changes` supports `inspect`, checked `patch` application, commit-preserving `cherry-pick`, `merge`, and `discard`. Cherry-pick and merge are tried in a temporary worktree first, so a conflict leaves the source checkout unchanged. `discard` asks for confirmation in interactive mode. A failed spawn removes the worktree it created.
 
 ## UI
 
-Subagent lifecycle tools render as compact main-chat cards with expandable detail. Running children appear in the shared bounded **Active work** dock with elapsed time and their current tool, then disappear when settled because the result card becomes the durable timeline record. `/subagents` or `/subagents agents` opens the live operations dashboard and takeover UI. `/btw <question>` starts a read-only, context-aware side investigation owned by the user; it opens directly in takeover view and records its answer without waking the parent model. Wide terminals use a split-pane agent list and selected-agent inspector with running/completed/cancelled/failed counts, model/profile/access metadata, a context meter, current tool activity, queue state, elapsed time, turns, cwd, and latest output. Aborting a running child from the dashboard requires pressing `x` twice; Escape or navigation cancels an armed abort. The takeover view adds a live transcript, context meter, active-tool state, scrolling, child interruption, and follow-up input. `/subagents peers` shows the persistent peer-message audit trail. `/subagents profiles` browses profiles and personas, and `/subagents config` edits validated configuration.
+Lifecycle tools render as compact cards with expandable detail. Running children appear in the shared **Active work** dock with elapsed time and their current tool.
 
-## Architecture
+- `/subagents` or `/subagents agents` opens the dashboard: a split list and inspector on wide terminals with status counts, model, profile, access, context use, current tool, queue, and latest output. Stopping a running child takes `x` twice.
+- The takeover view shows the live transcript and accepts follow-up input.
+- `/subagents peers` shows the peer-message log.
+- `/btw <question>` starts a read-only side investigation owned by the user. It opens in the takeover view and records its answer without waking the parent model.
 
-- `src/manager.ts` — Effect service, bounded lifecycle, normalized snapshots, cancellation, and retention
-- `src/backends/pi.ts` — in-process Pi sessions, trust-gated resources, capability filtering, context seeding, resume, and parent bridge
-- `src/config.ts` — built-in and user/project profiles, personas, validation, and limits
-- `src/catalog.ts` — global non-secret resumable-agent catalog
-- `src/context.ts` — safe context-fork selection and profile prompt assembly
-- `src/worktree.ts` — isolated worktree creation, inspection, conflict preflight, integration, and cleanup
-- `src/runtime.ts` — managed runtime and Pi backend registry
-- `src/ui/` — dashboard, transcript, and takeover components
+## Layout
+
+- `src/manager.ts`: Effect service, lifecycle, snapshots, cancellation, and retention
+- `src/backends/pi.ts`: in-process Pi child sessions, capability filtering, context seeding, resume, and the parent bridge
+- `src/config.ts`: profiles, personas, validation, and limits
+- `src/catalog.ts`: global resumable-agent catalog
+- `src/context.ts`: context forks and profile prompt assembly
+- `src/worktree.ts`: worktree creation, inspection, preflight, integration, and cleanup
+- `src/runtime.ts`: managed runtime and backend registry
+- `src/ui/`: dashboard, transcript, and takeover views

@@ -1,14 +1,12 @@
-# Development and cutover
-
-Last verified: 2026-09-04
+# Development
 
 ## Requirements
 
 - mise
-- Pi matching the pinned development dependency version
-- platform build support required by `@lydell/node-pty`
+- Pi at or above the version in `devDependencies`
+- platform build support for `@lydell/node-pty`
 
-Install the exact toolchain and dependencies:
+Install the pinned toolchain and dependencies:
 
 ```bash
 mise install --locked
@@ -17,66 +15,45 @@ mise exec --locked -- bun install
 
 ## Validation
 
-Validate the complete suite and inspect the package payload:
-
 ```bash
 mise exec --locked -- bun run validate
 mise exec --locked -- bun run pack:inspect
 ```
 
-The root validation checks TypeScript, runtime tests, declared extension and skill entrypoints, and forbidden runtime files. Inspect the package file list before committing. It must not contain credentials, `.env`, first-party caches, databases, sessions, logs, or `node_modules`.
+`validate` runs the TypeScript check, every `*.test.ts` file under `extensions/` with Node's test runner, and `scripts/validate-package.mjs`. The package check confirms that declared extensions and skills exist, are sorted, have READMEs and tests, and that the npm payload contains no credentials, `.env` files, caches, databases, sessions, logs, or first-party tests.
+
+Read the `pack:inspect` file list before committing a package change.
 
 ## Adding an extension
 
-1. Add a self-contained directory under `extensions/` with an `index.ts` entrypoint.
-2. Use relative imports for extension-owned code and `extensions/shared` only for genuinely shared behavior.
-3. Put external runtime modules in root `dependencies`.
-4. Add the exact entrypoint to root `package.json#pi.extensions`.
-5. Add focused runtime tests and update `docs/EXTENSIONS.md`.
-6. Run both validations and inspect the package payload.
+1. Create `extensions/<name>/index.ts` and `extensions/<name>/README.md`.
+2. Import extension-owned code relatively, and `extensions/shared` only for behavior another extension already shares.
+3. Put third-party runtime modules in root `dependencies`.
+4. Add the entrypoint to `package.json#pi.extensions` in sorted order.
+5. For each tool, choose its `exposure` and `annotations` (see [Tool exposure](EXTENSIONS.md#tool-exposure)) and keep its model-facing text short (see [Model-facing text](ARCHITECTURE.md#model-facing-text)).
+6. Add focused tests and a section in `docs/EXTENSIONS.md`.
+7. Run both validations.
 
-Do not add nested package manifests or lockfiles to default-suite extensions. The workspace root owns their dependencies and tooling.
+Do not add nested package manifests or lockfiles under `extensions/`.
 
 ## Runtime configuration
 
-Use `getAgentDir()` for user-level state and `CONFIG_DIR_NAME` for project-level Pi configuration. Use `node:path` and explicit platform branches where third-party credential locations differ. Never infer a writable location from `import.meta.url` or the installed package directory.
-
-Keep secrets out of examples and fixtures. Tests should inject temporary roots, fake environment objects, or local test servers rather than reading real credentials.
+Use `getAgentDir()` for user-level state and `CONFIG_DIR_NAME` for project-level Pi configuration. Never derive a writable location from `import.meta.url` or the install directory. Tests use temporary roots, fake environments, or local servers, never real credentials.
 
 ## Skills paired with extensions
 
-The root manifest declares `skills/background-terminals` and `skills/subagents`. Pi loads them directly from the managed package. Do not copy them into the agent directory from install scripts; that would create duplicates and leave stale files after removal.
+`package.json#pi.skills` declares `skills/background-terminals` and `skills/subagents`, and Pi loads them from the installed package. Do not copy them into the agent directory. When a paired extension's tools or delivery behavior change, update its skill in the same change.
 
-When any paired skill changes, validate its structure and keep its behavior aligned with the corresponding extension tools.
+## Upgrading Pi
 
-## Current-machine cutover
+1. Raise the `@earendil-works/pi-*` development dependencies, then run `mise exec --locked -- bun install` and `npm install --package-lock-only --ignore-scripts` to refresh both lockfiles.
+2. Read the Pi changelog for extension API changes, especially tool, event, and TUI changes.
+3. Run both validations, then load the working tree in Pi (`pi -ne -e ./extensions/<name>/index.ts`) to check commands and overlays that tests do not render.
 
-Do not remove a working local extension set before the managed package is available.
+## Releases
 
-1. Push and validate the public GitHub repository.
-2. Run `pi install git:https://github.com/shariqriazz/shariq-pi-extensions`; do not reload yet.
-3. Move old auto-discovered extension directories out of the active Pi extension directory so package and local copies cannot load together.
-4. Move the old paired skill directories out of active discovery; the Git package supplies them.
-5. Run `/reload` once.
-6. Verify package provenance through `pi list`, then check representative commands, tools, providers, and both packaged skills.
+GitHub hosts the source and npm distributes versioned releases. Any functional change bumps `package.json#version` (semantic versioning). Pushing to `main` runs `.github/workflows/ci.yml` and `.github/workflows/publish-npm.yml`; the publish workflow validates and publishes with npm trusted publishing and provenance whenever the version is not yet on npm.
 
-Rollback is the reverse: remove the Git package from Pi settings, restore the local extension and skill directories, and reload. Never delete credentials or databases during rollback.
+After the publish run succeeds, confirm the release with `npm view shariq-pi-extensions version` and update installed copies with `pi update --extensions`.
 
-## Distribution
-
-GitHub hosts the public source and npm distributes versioned releases. Push validated changes to `main` under the repository's normal Git policy.
-
-```bash
-git push origin main
-gh repo view shariqriazz/shariq-pi-extensions --json visibility,url
-```
-
-Before publishing a new npm version:
-
-1. Update `package.json#version` using semantic versioning.
-2. Run `mise exec --locked -- bun install` and `mise exec --locked -- bun run validate`.
-3. Inspect `mise exec --locked -- bun run pack:inspect` for secrets, runtime state, and accidental files.
-4. Run the `Publish npm package` workflow. npm trusted publishing authenticates it through GitHub OIDC and records provenance without a long-lived token.
-5. Verify the registry version and install it with `pi install npm:shariq-pi-extensions`.
-
-Use npm for stable versioned installs. Use an unpinned Git source for updates directly from `main`, and a tag or commit when a machine should remain fixed to a known revision.
+An npm install follows published versions. An unpinned Git install follows `main`; pin a tag or commit to keep a machine on a known revision.

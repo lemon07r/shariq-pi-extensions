@@ -15,7 +15,3 @@ The tool is deliberately narrow: agents should first inspect available context a
 - Escape or Ctrl+C dismisses the question without inventing an answer.
 - In non-TUI modes, returns an unavailable result so the agent can ask plainly only if still blocked.
 - Questions, labels, descriptions, and custom answers are bounded and sanitized before display.
-
-## Validation
-
-From the repository root, run `npm run validate`.

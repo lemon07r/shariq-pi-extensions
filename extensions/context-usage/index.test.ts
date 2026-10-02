@@ -69,3 +69,23 @@ test("is standalone and has no private runtime imports", async () => {
   const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\.\.\/_lib\//);
 });
+
+test("parses the Pi 1.0 structured system prompt without double counting", () => {
+  const prompt = [
+    "You are an expert coding assistant running in Pi.",
+    "<tools>\n- read: Read file contents\n</tools>",
+    "<rules>\n- Be concise in your responses\n</rules>",
+    "<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/repo/AGENTS.md\">\n# Repo rules\nUse bun.\n</project_instructions>\n</project_context>",
+    "<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\n\n<available_skills>\n  <skill>\n    <name>demo</name>\n    <description>Demo skill</description>\n    <location>/skills/demo/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>",
+    "<cwd>\n/repo\n</cwd>",
+  ].join("\n\n");
+
+  const remainder = internals.getPromptRemainder(prompt);
+  assert.doesNotMatch(remainder, /Repo rules/);
+  assert.doesNotMatch(remainder, /available_skills|demo/);
+  assert.match(remainder, /Be concise/);
+
+  const { skills } = internals.buildSkillsSection(prompt, 4);
+  assert.deepEqual(skills.map((skill) => skill.name), ["demo"]);
+  assert.equal(internals.parseContextSections(prompt, 4).length, 1);
+});

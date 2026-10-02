@@ -37,27 +37,19 @@ import { openTaskDashboard, taskGlyph } from "./ui.ts";
 
 const ACTIVITY_SOURCE = "task-list";
 const FINISHED_LINGER_MS = 4_000;
-const WORK_TOOL_EXCLUSIONS = new Set([
-  TASK_LIST_TOOL,
-  "get_goal",
-  "list_agents",
-  "check_agent",
-  "wait_agent",
-  "list_terminals",
-]);
 
 const TaskListParams = Type.Object({
   tasks: Type.Optional(Type.Array(
     Type.Object({
-      id: Type.String({ minLength: 1, maxLength: 80, description: "Stable identifier using letters, numbers, dots, underscores, or hyphens." }),
-      content: Type.String({ minLength: 1, maxLength: 500, description: "Short, concrete task outcome. Preserve user-supplied commands and exact literals." }),
-      status: StringEnum(TASK_STATUSES, { description: "pending | in_progress | completed | blocked | cancelled" }),
-      priority: Type.Optional(StringEnum(TASK_PRIORITIES, { description: "Defaults to medium; use high only when order or urgency materially requires it." })),
-      note: Type.Optional(Type.String({ maxLength: 1_000, description: "Concise evidence, blocker, cancellation reason, or execution detail." })),
+      id: Type.String({ minLength: 1, maxLength: 80, description: "Stable id: letters, numbers, dots, underscores, hyphens." }),
+      content: Type.String({ minLength: 1, maxLength: 500, description: "Concrete outcome. Keep user-supplied commands and literals exact." }),
+      status: StringEnum(TASK_STATUSES),
+      priority: Type.Optional(StringEnum(TASK_PRIORITIES, { description: "Default medium." })),
+      note: Type.Optional(Type.String({ maxLength: 1_000, description: "Evidence, blocker, or cancellation reason." })),
     }, { additionalProperties: false }),
-    { maxItems: 64, description: "The complete ordered task list. Supplying this field replaces the previous list." },
+    { maxItems: 64, description: "The complete ordered list; replaces the previous one." },
   )),
-  explanation: Type.Optional(Type.String({ maxLength: 1_000, description: "Why the list changed, especially after a scope or approach change." })),
+  explanation: Type.Optional(Type.String({ maxLength: 1_000, description: "Why the list changed." })),
 }, { additionalProperties: false });
 
 function statusColor(status: TaskStatus): "accent" | "success" | "warning" | "error" | "muted" {
@@ -97,8 +89,6 @@ export default function taskListExtension(pi: ExtensionAPI) {
   let state = emptyTaskListState();
   let lastCtx: ExtensionContext | null = null;
   let finishedTimer: ReturnType<typeof setTimeout> | undefined;
-  let workCallsSinceUser = 0;
-  let taskCallsSinceUser = 0;
 
   function cancelFinishedTimer(): void {
     if (!finishedTimer) return;
@@ -184,24 +174,9 @@ export default function taskListExtension(pi: ExtensionAPI) {
     });
   }
 
-  function reminderText(): string | null {
-    if (state.tasks.length === 0 && taskCallsSinceUser === 0 && workCallsSinceUser >= 2) {
-      return "You have started multi-action work without task_list. If this request requires at least three distinct actions or contains multiple user tasks, create the complete list now and call task_list in the same assistant message as the next action. Do not create a retroactive list if the work is already complete or was genuinely trivial.";
-    }
-    return null;
-  }
-
-  pi.on("input", async (event) => {
-    if (event.source === "extension") return;
-    workCallsSinceUser = 0;
-    taskCallsSinceUser = 0;
-  });
-
   pi.on("session_start", async (_event, ctx) => {
     lastCtx = ctx;
     state = restoreTaskList(ctx);
-    workCallsSinceUser = 0;
-    taskCallsSinceUser = 0;
     updatePresentation(ctx);
   });
 
@@ -210,36 +185,19 @@ export default function taskListExtension(pi: ExtensionAPI) {
     updatePresentation(ctx);
   });
 
-  pi.on("tool_execution_start", async (event, ctx) => {
-    lastCtx = ctx;
-    if (event.toolName === TASK_LIST_TOOL) taskCallsSinceUser++;
-    else if (!WORK_TOOL_EXCLUSIONS.has(event.toolName)) workCallsSinceUser++;
-  });
-
+  // Re-inject an unfinished list only when compaction or branching removed the
+  // latest snapshot from model context. Never prompt the model to start a list.
   pi.on("context", async (event) => {
-    const additions: AgentMessage[] = [];
-    if (hasActiveTasks(state) && !currentRevisionVisible(event.messages)) {
-      additions.push({
-        role: "custom",
-        customType: "task-list-context",
-        content: taskListContext(state),
-        display: false,
-        details: { revision: state.revision },
-        timestamp: Date.now(),
-      });
-    }
-    const reminder = reminderText();
-    if (reminder) {
-      additions.push({
-        role: "custom",
-        customType: "task-list-reminder",
-        content: `<task_list_reminder>${reminder}</task_list_reminder>`,
-        display: false,
-        details: { revision: state.revision },
-        timestamp: Date.now(),
-      });
-    }
-    return additions.length > 0 ? { messages: [...event.messages, ...additions] } : undefined;
+    if (!hasActiveTasks(state) || currentRevisionVisible(event.messages)) return undefined;
+    const continuity: AgentMessage = {
+      role: "custom",
+      customType: "task-list-context",
+      content: taskListContext(state),
+      display: false,
+      details: { revision: state.revision },
+      timestamp: Date.now(),
+    };
+    return { messages: [...event.messages, continuity] };
   });
 
   pi.on("session_shutdown", async () => {
@@ -336,23 +294,14 @@ export default function taskListExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: TASK_LIST_TOOL,
     label: "Task List",
-    description: `Read or replace the ordered task list for this coding session. Omit tasks to read it. When tasks is supplied, it is the COMPLETE replacement list, not a patch.
+    description: `Read or replace this session's ordered task list. Omit tasks to read it. Supplying tasks replaces the whole list, so include every item to keep, with stable ids. While pending work remains, keep at least one item in_progress.
 
-Use task_list for work with at least three distinct actions, multiple user-requested tasks, or meaningful phases that need visible progress. Skip it for a direct answer or one or two simple actions.
-
-Start the list before substantive work and call task_list in the SAME assistant message as the first action tool. Never spend a turn only announcing or updating the list when another action can run. Keep stable ids and preserve every user-requested item, exact command, flag, path, and success condition.
-
-Update the list only when task-level state changes—not after every file read, edit, command, or tool call. When a task is fully verified, mark it completed, move the next sequential item to in_progress, and issue that next action in the same assistant message. Also update for genuine blockers, cancellations, or user-requested scope changes. Keep one in_progress task for sequential work; use several only when work is genuinely running in parallel.
-
-Before the final response, reconcile the whole list with actual results. No item may remain pending or in_progress if the requested work is finished. Do not claim completion from the list itself.`,
-    promptSnippet: "Read or replace the current session's complete task list and progress state.",
+Send the first list together with the first real action rather than in a turn of its own. Update the list only when a task finishes, is blocked or cancelled, or the scope changes, and pair the update with the next action. Before the final response, mark finished items completed; the list records progress but does not prove it.`,
+    promptSnippet: "Track a visible plan for multi-deliverable work.",
     promptGuidelines: [
-      "Use task_list for requests with at least three distinct actions, multiple requested tasks, or meaningful phases; skip it for direct answers and one- or two-action work.",
-      "Create task_list before substantive multi-step work and send the update in the same assistant message as the first real action; never spend a turn on task bookkeeping alone when another action exists.",
-      "Every task_list write replaces the entire ordered list. Preserve stable ids, all unfinished and user-requested work, and exact commands, flags, paths, and success conditions.",
-      "Update task_list only for task-level transitions: verified completion, starting the next task, a genuine blocker or cancellation, or a user-requested scope change. Do not update it after every file read, edit, command, or tool call. Pair transitions with the next action when work remains.",
-      "Before a final response, reconcile task_list with observed results and leave no stale pending or in_progress items when the requested work is finished. The list is not proof of completion.",
+      "Use task_list only when the user asks for a plan or checklist, the request has several separate deliverables, or long multi-phase work benefits from visible progress. Work on a single objective directly, even when it takes many reads, edits, and test runs.",
     ],
+    exposure: "model-only",
     parameters: TaskListParams,
     async execute(_toolCallId, params: TaskListInput, _signal, _onUpdate, ctx) {
       lastCtx = ctx;

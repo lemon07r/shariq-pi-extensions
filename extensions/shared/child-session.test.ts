@@ -99,12 +99,16 @@ test("child denylist keeps extension and workflow structured tools available", a
     assert.deepEqual(
       [...CHILD_EXCLUDED_TOOL_NAMES],
       [
-        "subagent_spawn",
-        "subagent_wait",
-        "subagent_cancel",
-        "subagent_check",
-        "subagent_list",
-        "workflow",
+        "spawn_agent",
+        "wait_agent",
+        "close_agent",
+        "check_agent",
+        "list_agents",
+        "list_agent_profiles",
+        "send_message",
+        "apply_agent_changes",
+        "task",
+        "reply_question",
         "ask_user",
       ],
     );

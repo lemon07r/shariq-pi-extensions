@@ -43,9 +43,9 @@ test("persistent ids preserve the legacy sa-N shape without collisions", () => {
 
 test("subagent guidance defaults to shared workspace and reserves isolation for real interference", () => {
   const guidance = SUBAGENT_SPAWN_PROMPT_GUIDELINES.join(" ");
-  assert.match(guidance, /Keep isolation none by default/);
-  assert.match(guidance, /Do not isolate read-only work or clearly separate edits/);
-  assert.match(WORKTREE_ISOLATION_DESCRIPTION, /concurrent write tasks are likely to overlap or interfere/);
+  assert.match(guidance, /Keep isolation none unless concurrent writers would overlap/);
+  assert.match(WORKTREE_ISOLATION_DESCRIPTION, /^Default none/);
+  assert.match(WORKTREE_ISOLATION_DESCRIPTION, /clean source checkout/);
 });
 
 test("profile instructions and the assigned task have explicit prompt boundaries", () => {

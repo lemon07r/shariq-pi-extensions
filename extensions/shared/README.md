@@ -1,22 +1,16 @@
-# Shared Extension Helpers
+# Shared extension helpers
 
-Internal runtime utilities used by more than one extension. This directory is not a Pi extension and has no `index.ts` entrypoint in the package manifest.
+Runtime helpers used by more than one extension. This directory is not an extension and has no entry in the package manifest.
 
 ## Modules
 
-- `activity-dock.ts` aggregates bounded urgency-ordered live rows from Task List, Background Terminals, and Subagents into one automatic widget.
-- `activity-status.ts` formats compact running/completed/failed status counts.
-- `child-session.ts` owns trust-aware child resources and bounded session shutdown.
-- `context-utilization.ts` formats model-context usage and capacity.
-- `dashboard-state.ts` keeps list selection stable as live rows change.
-- `model-picker.ts` provides a searchable, fuzzy-filtered model selection overlay with provider grouping, display metadata, context sizes, and keyboard navigation.
-- `settlement-delivery.ts` coordinates asynchronous output in a private package-wide queue and starts one custom-result turn at Pi's safe idle edge, guaranteeing model-visible context without user-authored or follow-up rendering.
-- `tool-call-timeout.ts` applies cancellation-aware execution limits to registered tools.
-- `tool-card.ts` provides compact lifecycle call/result cards with expandable tool output.
-- `tui-dashboard.ts` provides bounded, sanitized terminal-dashboard rendering helpers.
+- `activity-dock.ts`: one bounded **Active work** widget that merges live rows from Task List, Background Terminals, and Subagents, ordered by urgency.
+- `child-session.ts`: trust-aware resource loading for child sessions, the tool denylist for children, and bounded child shutdown.
+- `context-utilization.ts`: context usage and capacity formatting.
+- `model-picker.ts`: searchable model picker overlay.
+- `settlement-delivery.ts`: one queue per Pi session for asynchronous results. While the parent runs, results wait privately; at the idle edge they are delivered as custom messages and the last one starts a single model turn.
+- `tool-call-timeout.ts`: cancellation-aware time limits for registered tools.
+- `tool-card.ts`: compact tool call and result cards with expandable output.
+- `tui-dashboard.ts`: width-safe, sanitized drawing helpers for terminal dashboards.
 
-Keep extension-specific behavior in its owning `extensions/<name>` directory. Move code here only when multiple extensions genuinely share the same runtime contract.
-
-## Validation
-
-From the repository root, run `npm run validate`.
+Keep behavior that only one extension uses inside that extension. Move code here only when several extensions share the same contract, and delete a module here once nothing imports it.

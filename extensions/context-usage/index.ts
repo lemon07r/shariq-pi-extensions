@@ -168,9 +168,11 @@ type ContextUsageGlobal = typeof globalThis & {
 
 const g = globalThis as ContextUsageGlobal;
 
-const PROJECT_CONTEXT_RE = /\n?<project_context>\n\n[\s\S]*?\n<\/project_context>\n?/;
+// Pi 1.0 renders structured sections as `<name>\n...\n</name>`; older releases
+// separated the project context with a blank line. Accept both.
+const PROJECT_CONTEXT_RE = /\n?<project_context>\n\n?[\s\S]*?\n<\/project_context>\n?/;
 const PROJECT_INSTRUCTIONS_RE = /<project_instructions path="([^"]*)">\n([\s\S]*?)\n<\/project_instructions>/g;
-const AVAILABLE_SKILLS_RE = /\n\nThe following skills provide specialized instructions for specific tasks\.[\s\S]*?<available_skills>[\s\S]*?<\/available_skills>/;
+const AVAILABLE_SKILLS_RE = /(?:\n?<skills>\n|\n\n)The following skills provide specialized instructions for specific tasks\.[\s\S]*?<available_skills>[\s\S]*?<\/available_skills>(?:\n<\/skills>)?/;
 const SKILL_RE = /<skill>\s*<name>([\s\S]*?)<\/name>[\s\S]*?<description>([\s\S]*?)<\/description>[\s\S]*?<location>([\s\S]*?)<\/location>\s*<\/skill>/g;
 const DEFAULT_MODE: ViewMode = "summary";
 const OPENAI_TOOL_TEXT_FRAGMENT_DENOMINATOR = 6.6;
@@ -1538,9 +1540,12 @@ function renderSummary(snapshot: PrefixSnapshot, theme: Theme, width = 80): stri
     window && window > 0 ? `/ ${contextWindowLabel(window)}` : undefined,
     percent ? `· ${percent}` : undefined,
   ].filter(Boolean).join(" ");
-  const breakdown = snapshot.sections
-    .map((section) => `${summarySectionLabel(section.title)} ~${compactCount(sectionTokens(section))}`)
-    .join(SEP);
+  const totals = new Map<string, number>();
+  for (const section of snapshot.sections) {
+    const label = summarySectionLabel(section.title);
+    totals.set(label, (totals.get(label) ?? 0) + sectionTokens(section));
+  }
+  const breakdown = [...totals].map(([label, tokens]) => `${label} ~${compactCount(tokens)}`).join(SEP);
   const ctrlO = keyText("app.tools.expand") || "Ctrl+O";
   const rows = [
     ` ${theme.fg("text", budgetParts)}`,

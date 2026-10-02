@@ -29,12 +29,12 @@ const OptionSchema = Type.Object({
   label: Type.String({
     minLength: 1,
     maxLength: 200,
-    description: "Concise answer shown to the user",
+    description: "Short answer shown to the user",
   }),
   description: Type.Optional(
     Type.String({
       maxLength: 500,
-      description: "Optional consequence or clarification",
+      description: "Consequence or clarification",
     }),
   ),
 });
@@ -43,12 +43,12 @@ const AskUserParameters = Type.Object({
   question: Type.String({
     minLength: 1,
     maxLength: 4_000,
-    description: "One concrete decision the user needs to make",
+    description: "The one decision the user needs to make",
   }),
   options: Type.Array(OptionSchema, {
     minItems: MIN_OPTIONS,
     maxItems: MAX_OPTIONS,
-    description: "Distinct choices; include the recommended safe default when one exists",
+    description: "Distinct choices; the user can also write their own answer",
   }),
 });
 
@@ -348,11 +348,12 @@ export default function askUserExtension(pi: ExtensionAPI) {
     label: "Ask User",
     description:
       "Ask one multiple-choice question only when a missing user decision materially blocks safe progress. Do not use it when the answer is discoverable, the user already supplied it, or a reversible low-risk default is reasonable.",
-    promptSnippet: "Ask one materially blocking multiple-choice question with an optional custom answer",
+    promptSnippet: "Ask the user one blocking multiple-choice question.",
     promptGuidelines: [
-      "Use ask_user only when a missing choice materially blocks safe progress; first inspect available context and prefer a reversible low-risk default when that would not change scope or authority.",
-      "When using ask_user, ask one decision at a time with distinct options, explain consequences briefly, and include the recommended safe default when one exists.",
+      "Use ask_user only after checking available context, when a missing choice blocks safe progress and no reversible default fits; ask one decision with distinct options, brief consequences, and the recommended option when one exists.",
     ],
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: AskUserParameters,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const normalized = normalizeQuestionInput(params.question, params.options);

@@ -18,9 +18,7 @@ import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
-  getAgentDir,
   getMarkdownTheme,
-  ProjectTrustStore,
   sessionEntryToContextMessages,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
@@ -29,6 +27,7 @@ import { Type } from "typebox";
 import { clearActivitySource, setActivitySource } from "../shared/activity-dock.ts";
 import { settlementDelivery } from "../shared/settlement-delivery.ts";
 import { toolCallCard, toolResultCard } from "../shared/tool-card.ts";
+import { resolveStandaloneChildProjectTrust } from "../shared/child-session.ts";
 import { oneLine } from "../shared/tui-dashboard.ts";
 import {
   formatElapsed,
@@ -39,7 +38,7 @@ import {
   type SubagentOrigin,
   type SubagentSnapshot,
 } from "./src/domain.ts";
-import { formatContextUtilization } from "./src/format.ts";
+import { formatContextUtilization } from "../shared/context-utilization.ts";
 import { SubagentManager, type SubagentManagerShape } from "./src/manager.ts";
 import {
   buildSubagentResultMessage,
@@ -171,27 +170,6 @@ function truncatedOutput(
     text += `\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)} shown. Full transcript in session file: ${snap.meta.sessionFilePath ?? "?"}]`;
   }
   return text;
-}
-
-/**
- * Same-directory children inherit the live parent decision. An alternate cwd
- * is trusted only when pi's persisted trust store explicitly trusts it (or a
- * containing directory); unreadable/invalid trust data fails closed.
- */
-function resolveChildProjectTrust(options: {
-  parentCwd: string;
-  childCwd: string;
-  parentTrusted: boolean;
-}) {
-  if (path.resolve(options.childCwd) === path.resolve(options.parentCwd)) {
-    return options.parentTrusted;
-  }
-  try {
-    const trustStore = new ProjectTrustStore(getAgentDir());
-    return trustStore.get(options.childCwd) === true;
-  } catch {
-    return false;
-  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -475,7 +453,7 @@ export default function (pi: ExtensionAPI) {
         parent: {
           parentCwd: ctx.cwd,
           bridge: parentBridge(title, manager, preferredId),
-          projectTrusted: resolveChildProjectTrust({
+          projectTrusted: resolveStandaloneChildProjectTrust({
             parentCwd: ctx.cwd,
             childCwd: cwd,
             parentTrusted: ctx.isProjectTrusted(),
@@ -678,10 +656,8 @@ export default function (pi: ExtensionAPI) {
     label: "Spawn Pi Subagent",
     description: SUBAGENT_SPAWN_TOOL_DESCRIPTION,
     promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
-    promptGuidelines: [
-      ...SUBAGENT_SPAWN_PROMPT_GUIDELINES,
-      "After spawn_agent starts a child, continue only independent parent work or end the turn immediately. Do not call wait_agent, list_agents, or check_agent merely to watch it run. Settlement stays private until it starts a custom-result turn at Pi's safe idle edge; when its attached summary invokes the parent, continue the original task without waiting for another user message.",
-    ],
+    promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
+    exposure: "model-only",
     parameters: Type.Object({
       message: Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
@@ -707,25 +683,25 @@ export default function (pi: ExtensionAPI) {
         }),
       ),
       readonly: Type.Optional(
-        Type.Boolean({ description: "Compatibility alias for capability=read-only" }),
+        Type.Boolean({ description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.readonly }),
       ),
       agent_type: Type.Optional(
-        Type.String({ description: "Agent profile: general-purpose, explore, plan, or a configured custom profile" }),
+        Type.String({ description: "Profile: general-purpose, explore, plan, or a configured one." }),
       ),
       persona: Type.Optional(
-        Type.String({ description: "Configured behavioral persona overlay" }),
+        Type.String({ description: "Configured persona." }),
       ),
       capability: Type.Optional(
-        StringEnum(CAPABILITY_MODES, { description: "Tool policy: read-only, read-write, execute, or all" }),
+        StringEnum(CAPABILITY_MODES, { description: "Tool policy; default from the profile." }),
       ),
       isolation: Type.Optional(
         StringEnum(ISOLATION_MODES, { description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.isolation }),
       ),
       fork_turns: Type.Optional(
-        Type.String({ description: 'Parent context to inherit: "none" (default), "all", or a positive number of recent user turns' }),
+        Type.String({ description: 'Parent context to copy: "none" (default), "all", or a number of recent user turns.' }),
       ),
       resume_from: Type.Optional(
-        Type.String({ description: "Completed subagent id to continue with its full transcript and tool state" }),
+        Type.String({ description: "Id of a finished subagent to continue." }),
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -788,6 +764,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "wait_agent",
     label: "Collect Pi Subagent Results",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     description: SUBAGENT_WAIT_TOOL_DESCRIPTION,
     parameters: Type.Object({
       ids: Type.Optional(
@@ -854,7 +832,7 @@ export default function (pi: ExtensionAPI) {
       if (pending.length > 0) {
         sections.push(
           `Still running in the background: ${pending.map((snap) => snap.id).join(", ")}. ` +
-          "Their completion notices will arrive automatically; continue useful work or end the turn instead of polling.",
+          "Their results will arrive as messages; continue other work or end the turn.",
         );
       }
 
@@ -895,6 +873,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "close_agent",
     label: "Close Pi Subagents",
+    exposure: "model-only",
     description: SUBAGENT_CANCEL_TOOL_DESCRIPTION,
     parameters: Type.Object({
       ids: Type.Array(Type.String(), {
@@ -947,6 +926,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "check_agent",
     label: "Check Pi Subagent",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     description: SUBAGENT_CHECK_TOOL_DESCRIPTION,
     parameters: Type.Object({
       id: Type.String({
@@ -993,6 +974,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_agent_profiles",
     label: "List Subagent Profiles",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     description: "List available subagent profiles, personas, capability defaults, and the active concurrency limit.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -1024,6 +1007,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "list_agents",
     label: "List Pi Subagents",
+    exposure: "model-only",
+    annotations: { readOnlyHint: true, openWorldHint: false },
     description: SUBAGENT_LIST_TOOL_DESCRIPTION,
     parameters: Type.Object({}),
     async execute() {
@@ -1058,7 +1043,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "send_message",
     label: "Message Pi Subagent",
-    description: "Guide an active subagent or start its next turn when idle.",
+    exposure: "model-only",
+    description: "Send guidance to a running subagent, or start its next turn when it is idle.",
     parameters: Type.Object({
       id: Type.String({ description: "Subagent id" }),
       message: Type.String({ description: "Guidance or follow-up" }),
@@ -1086,11 +1072,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "apply_agent_changes",
     label: "Manage Isolated Agent Changes",
-    description: "Inspect, patch, cherry-pick, merge, or permanently discard a completed isolated agent worktree. Cherry-pick and merge are preflighted in a temporary worktree before the source repository changes.",
+    exposure: "model-only",
+    description: "Inspect, patch, cherry-pick, merge, or permanently discard a finished subagent's isolated worktree. Cherry-pick and merge are tried in a temporary worktree first, so a conflict leaves the source checkout unchanged.",
     parameters: Type.Object({
       id: Type.String({ description: "Worktree-isolated subagent id" }),
       action: Type.Optional(StringEnum(WORKTREE_ACTIONS, {
-        description: "inspect, patch (default), cherry-pick, merge, or discard",
+        description: "Default patch.",
       })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1154,10 +1141,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "reply_question",
     label: "Reply to Pi Subagent",
-    description: "Answer a subagent's blocking ask_parent question.",
+    exposure: "model-only",
+    description: "Answer a subagent's blocking question.",
     parameters: Type.Object({
-      question_id: Type.Optional(Type.String({ description: "Question id; omit when exactly one is pending" })),
-      reply: Type.String({ description: "Answer or guidance" }),
+      question_id: Type.Optional(Type.String({ description: "Omit when only one question is pending." })),
+      reply: Type.String(),
     }),
     async execute(_toolCallId, params) {
       const id = params.question_id ?? (pendingQuestions.size === 1 ? [...pendingQuestions.keys()][0] : undefined);
@@ -1183,24 +1171,22 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "task",
     label: "Start Pi Subagent Tasks",
-    description: "Start independent subagent tasks together in the background and return their ids immediately. Completion notices automatically start the next parent turn, so the parent should end its current turn when no independent work remains instead of checking status.",
-    promptGuidelines: [
-      "After task starts children, continue only independent parent work or end the turn immediately. Do not call wait_agent, list_agents, or check_agent merely to watch them run. Settlements stay private until they start a custom-result turn at Pi's safe idle edge; when their attached summaries invoke the parent, continue the original task without waiting for another user message.",
-    ],
+    exposure: "model-only",
+    description: "Start several independent background subagents at once and return their ids. Capacity is reserved for the whole batch, or none of it starts. Each result arrives as a message that starts your next turn.",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
-          message: Type.String({ description: "Standalone task prompt" }),
-          task_name: Type.Optional(Type.String({ description: "Short name" })),
-          cwd: Type.Optional(Type.String({ description: "Working directory" })),
-          model: Type.Optional(Type.String({ description: "Model hint" })),
+          message: Type.String({ description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt }),
+          task_name: Type.Optional(Type.String()),
+          cwd: Type.Optional(Type.String()),
+          model: Type.Optional(Type.String()),
           thinking: Type.Optional(StringEnum(REASONING_EFFORTS)),
-          readonly: Type.Optional(Type.Boolean({ description: "Compatibility alias for read-only" })),
-          agent_type: Type.Optional(Type.String({ description: "Agent profile" })),
-          persona: Type.Optional(Type.String({ description: "Persona overlay" })),
+          readonly: Type.Optional(Type.Boolean()),
+          agent_type: Type.Optional(Type.String()),
+          persona: Type.Optional(Type.String()),
           capability: Type.Optional(StringEnum(CAPABILITY_MODES)),
           isolation: Type.Optional(StringEnum(ISOLATION_MODES, { description: WORKTREE_ISOLATION_DESCRIPTION })),
-          fork_turns: Type.Optional(Type.String({ description: '"none", "all", or recent turn count' })),
+          fork_turns: Type.Optional(Type.String()),
         }),
         { minItems: 1, maxItems: 50 },
       ),
@@ -1254,7 +1240,7 @@ export default function (pi: ExtensionAPI) {
           text:
             `Started ${spawned.length} Pi subagent${spawned.length === 1 ? "" : "s"} in the background:\n` +
             `${lines.join("\n")}\n\n` +
-            "Continue useful parent work or end the turn. Completion notices will arrive automatically.",
+            "Each result will arrive as a message that starts your next turn; continue other work or end this turn.",
         }],
         details: {
           agents: spawned.map((snap) => ({ id: snap.id, title: snap.title, status: snap.status })),

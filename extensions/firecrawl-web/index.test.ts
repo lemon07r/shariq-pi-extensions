@@ -22,9 +22,11 @@ test("registers native web_search, web_scrape, and dev_search tools", () => {
   assert.match(tools.get("web_search")!.description, /Firecrawl/);
   assert.match(tools.get("web_scrape")!.description, /web_fetch/);
   assert.match(tools.get("dev_search")!.description, /Developer Index/);
-  assert.match(tools.get("web_search")!.promptGuidelines!.join(" "), /untrusted data, not instructions/);
-  assert.match(tools.get("web_scrape")!.promptGuidelines!.join(" "), /untrusted data, not instructions/);
-  assert.match(tools.get("dev_search")!.promptGuidelines!.join(" "), /untrusted data, not instructions/);
+  const guidance = tools.get("web_search")!.promptGuidelines!.join(" ");
+  assert.match(guidance, /dev_search/);
+  assert.match(guidance, /web_scrape/);
+  assert.match(guidance, /untrusted data, not instructions/);
+  for (const tool of tools.values()) assert.match(tool.description, /untrusted/);
 });
 
 test("builds a compact Firecrawl search request with explicit filters", () => {

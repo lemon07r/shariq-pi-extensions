@@ -9,7 +9,7 @@ A Pi-native persisted-goal system using Pi session entries and lifecycle hooks, 
 - `update_goal_progress` — maintain a structured checklist and evidence ledger.
 - `update_goal` — mark a goal `complete` or `blocked` under strict, runtime-enforced completion and blocker rules.
 
-Goal tools are active only for persisted Pi sessions. Temporary/`--no-session` children do not receive them.
+Goal tools are active only in saved Pi sessions; `--no-session` runs and other ephemeral sessions do not receive them. They use `model-only` exposure, so codemode scripts cannot call them.
 
 ## Statuses
 
@@ -38,7 +38,3 @@ Use `/goal [<objective>|status|clear|edit|pause|resume]` for host-side control. 
 ## Pi-specific policy
 
 Pi allows goal objectives up to **20,000 Unicode characters**. Current Codex uses 4,000; this larger limit is intentional.
-
-## Validation
-
-From the repository root, run `npm run validate`.

@@ -14,7 +14,7 @@ import type {
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Input, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { formatElapsed, latestText, type SubagentSnapshot } from "../domain.ts";
-import { contextPercent, formatContextUtilization } from "../format.ts";
+import { contextPercent, formatContextUtilization } from "../../../shared/context-utilization.ts";
 import {
   joinSides,
   meter,
