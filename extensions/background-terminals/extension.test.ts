@@ -53,7 +53,8 @@ test("registers the PTY tool surface, control-center commands, and lifecycle cle
   assert.match(read.description, /when the user asks for progress or the process is waiting for input/);
   assert.match(read.description, /Completion output arrives on its own/);
   for (const tool of tools.values()) {
-    assert.equal(tool.exposure, "model-only", `${tool.name} should stay declared to the model`);
+    const scriptable = tool.name === "read_terminal" || tool.name === "list_terminals";
+    assert.equal(tool.exposure, scriptable ? undefined : "model-only", `${tool.name} exposure`);
     assert.equal(typeof tool.renderCall, "function", `${tool.name} should render a compact call card`);
     assert.equal(typeof tool.renderResult, "function", `${tool.name} should render a compact result card`);
   }

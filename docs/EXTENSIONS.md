@@ -58,4 +58,4 @@ Adds `/exit` as an alias for `/quit`.
 
 ## Tool exposure
 
-Pi 1.0 lets each tool choose how the model reaches it. Tools that ask the user, manage lifecycles, or change session state (questions, goals, task list, terminals, subagents) use `model-only` exposure: they stay declared to the model even with `codemode.mode: "only"`, and codemode scripts cannot call them. The read-only web tools keep the default `direct` exposure so scripts can call them in parallel. Read-only tools also declare `readOnlyHint` annotations for permission extensions.
+Pi 1.0 lets each tool choose how the model reaches it. Tools that ask the user, manage lifecycles, or change session state (questions, goals, task list, starting, writing to, or stopping terminals, subagents) use `model-only` exposure: they stay declared to the model even with `codemode.mode: "only"`, and codemode scripts cannot call them. The read-only web tools and `read_terminal` and `list_terminals` keep the default `direct` exposure so scripts can call them in parallel and filter their output. Read-only tools also declare `readOnlyHint` annotations for permission extensions.

@@ -230,7 +230,7 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
     description:
       "Read a background terminal's output since a cursor; omit the cursor for the retained tail. " +
       "Use it when the user asks for progress or the process is waiting for input. Completion output arrives on its own.",
-    exposure: "model-only",
+    // Read-only, so codemode scripts may call it to filter large logs.
     annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: Type.Object({
       id: Type.String({ description: 'Terminal id, such as "term-1".' }),
@@ -317,7 +317,6 @@ export default function backgroundTerminals(pi: ExtensionAPI) {
     name: "list_terminals",
     label: "List Background Terminals",
     description: "List background terminals with id, status, pid, elapsed time, and working directory.",
-    exposure: "model-only",
     annotations: { readOnlyHint: true, openWorldHint: false },
     parameters: Type.Object({}),
     async execute() {

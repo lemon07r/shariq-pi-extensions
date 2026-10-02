@@ -10,7 +10,7 @@ Session-scoped background pseudo-terminals for Pi. The extension combines Codex-
 - `list_terminals` — list running and settled terminals.
 - `stop_terminal` — stop complete process groups with TERM-to-KILL escalation.
 
-Each output response carries a byte cursor; pass it to the next read or write to get only new output. The tools render as compact cards with expandable output, use `model-only` exposure, and running terminals appear in the shared **Active work** dock with elapsed time and the latest output line.
+`read_terminal` and `list_terminals` are read-only and callable from codemode scripts, so a script can filter a long log down to what matters; the tools that start, write to, or stop processes use `model-only` exposure. Each output response carries a byte cursor; pass it to the next read or write to get only new output. The tools render as compact cards with expandable output, and running terminals appear in the shared **Active work** dock with elapsed time and the latest output line.
 
 When a model-started terminal exits, its status and a bounded output tail are delivered as a custom message. An idle parent starts a new turn for it; a busy parent receives it, together with any other pending results, when its run settles. The message never appears as user-authored or follow-up input, and reading the terminal does not suppress it.
 

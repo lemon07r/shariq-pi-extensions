@@ -44,7 +44,9 @@ Capability modes:
 - `execute`: the read-only set plus `bash` and background terminals, without direct edits;
 - `all`: every tool the child loads.
 
-Restrictive modes fail closed: an extension tool is unavailable until it is classified in `src/backends/pi.ts`. The session-only `task_list` tool is allowed in every mode.
+Restrictive modes fail closed: an extension tool is unavailable until it is classified in `src/backends/pi.ts`, and a child-only `tool_call` check refuses unclassified tools at call time, including tools registered later. The session-only `task_list` tool is allowed in every mode.
+
+Children load the same packages and extensions as the parent but not Pi's built-in extensions (`codemode`, MCP, and tool search), because Pi does not export them to extensions.
 
 Each tool call inside a child times out after three minutes.
 
