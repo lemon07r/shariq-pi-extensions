@@ -89,11 +89,42 @@ User profiles and personas live in `<agent-dir>/subagents.json`. Trusted project
 
 Project configuration is ignored for untrusted projects. `maxConcurrent` is bounded to 1–50 and defaults to 50. `/subagents profiles` lists profiles, and `/subagents config` opens a validated editor for the global or trusted-project file.
 
+## Fusion mode
+
+Fusion mode is optional and off by default. When it is on, the main session acts as the lead and delegates without being asked: one persistent `sidekick` per workstream implements decided work, and light profiles take routine edits and checks. The lead keeps intent, planning, architecture, security, and final review. Turn it on with `/subagents fusion on`, or set `"fusion": true` in either configuration file; a trusted project's setting wins over the global one.
+
+Fusion adds these profiles and tiers:
+
+| Profile | Tier | Capability | Use |
+|---|---|---|---|
+| `sidekick` | medium | all | decided implementation and debugging from a concrete failure |
+| `explore` | medium | execute | substantive read-only tracing |
+| `reviewer` | medium | execute | one fresh review of a final diff |
+| `worker` | light | all | fully specified mechanical edits, docs, narrow tests |
+| `verifier` | light | execute | builds, tests, and reproductions; reports failures only |
+| `general-purpose` | heavy | all | hard decided work after the sidekick is blocked |
+
+Each tier maps to a model and thinking level for children; the lead keeps the model you selected in Pi. An unset tier, or an unset field, inherits the parent session's, so with no `tiers` block every child runs on the parent's model:
+
+```json
+{
+  "fusion": true,
+  "tiers": {
+    "light": { "model": "provider/fast-model", "thinking": "medium" },
+    "medium": { "model": "provider/coding-model", "thinking": "xhigh" }
+  }
+}
+```
+
+Any profile can set `"tier"`, with or without Fusion mode. A profile's own `model` and `thinking` win over its tier, and a call's overrides win over both. Profiles you define with the same names are merged over the Fusion defaults, so you can change one field without restating the rest. `list_agent_profiles` and `/subagents profiles` show the mode, the tiers, and each profile's tier. A child started from a Fusion profile can still be resumed after the mode is turned off.
+
+Only the lead sees the Fusion guideline and the `fusion` skill; children keep the default rules and cannot start agents.
+
 ## Context and continuation
 
 New children start without parent context. `fork_turns` can be `all` or a positive number of recent user turns; the fork keeps user messages and final assistant text and drops thinking, tool calls, and tool results.
 
-Every child has a persistent Pi session file. `resume_from` continues a finished or cancelled child with its transcript, tool state, and id, including after a parent reload or restart. An archived child resumes with its stored profile, persona, capability, and worktree unless the call overrides them. A child still loaded in this session keeps its settings, so a resume call that passes different ones is rejected. A run interrupted by cancellation or reload is recorded as `cancelled`, not as a failure.
+Every child has a persistent Pi session file. `resume_from` continues a finished or cancelled child with its transcript, tool state, and id, including after a parent reload or restart. An archived child resumes with its stored profile, persona, capability, and worktree unless the call overrides them, and takes its model and thinking level from that profile, its tier, or the call. A child still loaded in this session keeps its settings, so a resume call that passes different ones is rejected. A run interrupted by cancellation or reload is recorded as `cancelled`, not as a failure.
 
 A child running in another Pi process cannot be resumed, and its worktree cannot be changed, until that process finishes or exits; a crashed owner is detected and its child becomes resumable.
 

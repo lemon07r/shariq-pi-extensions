@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import extension, { deriveBtwTitle } from "./index.ts";
+import { saveConfigDocument } from "./src/config.ts";
+import { SUBAGENT_SPAWN_PROMPT_GUIDELINES } from "./src/prompt.ts";
 
 test("derives compact Unicode-safe titles for by-the-way questions", () => {
   assert.equal(deriveBtwTitle("  Why is this failing?\nMore detail"), "Why is this failing?");
@@ -93,5 +99,57 @@ test("registers one Pi-only canonical API and the takeover dashboard", () => {
     "subagent_list",
   ]) {
     assert.equal(tools.has(legacy), false);
+  }
+});
+
+test("fusion mode swaps the lead's delegation rule and shows the fusion skill only to the lead", () => {
+  const handlers = new Map<string, (event: any, ctx: any) => any>();
+  const fakePi = {
+    events: { on() { return () => {}; }, emit() {} },
+    registerTool() {},
+    registerCommand() {},
+    registerMessageRenderer() {},
+    registerEntryRenderer() {},
+    on(name: string, handler: any) {
+      handlers.set(name, handler);
+    },
+    sendMessage() {},
+    getThinkingLevel() { return "medium"; },
+  };
+  extension(fakePi as never);
+  const hook = handlers.get("before_agent_start")!;
+
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagent-fusion-test-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagent-agent-dir-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const fusionSkillDir = fileURLToPath(new URL("../../skills/fusion", import.meta.url));
+  const run = (tools: string[]) => {
+    const options = {
+      selectedTools: tools,
+      toolGuidelines: tools.includes("spawn_agent") ? { spawn_agent: [...SUBAGENT_SPAWN_PROMPT_GUIDELINES] } : {},
+      skills: [{ name: "fusion", baseDir: fusionSkillDir }, { name: "other", baseDir: cwd }],
+    };
+    hook({ systemPromptOptions: options }, { cwd, isProjectTrusted: () => false });
+    return { guidelines: options.toolGuidelines.spawn_agent?.join("\n") ?? "", skills: options.skills.map((skill) => skill.name) };
+  };
+  try {
+    const off = run(["read", "spawn_agent"]);
+    assert.match(off.guidelines, /only when the user asks to delegate/);
+    assert.deepEqual(off.skills, ["other"]);
+
+    saveConfigDocument("global", cwd, JSON.stringify({ fusion: true }));
+    const lead = run(["read", "spawn_agent"]);
+    assert.match(lead.guidelines, /Fusion mode is on, so delegate without being asked/);
+    assert.doesNotMatch(lead.guidelines, /only when the user asks to delegate/);
+    assert.match(lead.guidelines, /instead of polling wait_agent/);
+    assert.deepEqual(lead.skills, ["fusion", "other"]);
+
+    assert.deepEqual(run(["read", "bash"]).skills, ["other"]);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   }
 });
