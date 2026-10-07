@@ -147,6 +147,8 @@ test("restrictive capabilities fail closed for extension execution tools", () =>
 test("profile resolution applies explicit overrides before profile and persona defaults", () => {
   const config: SubagentConfig = {
     maxConcurrent: 4,
+    fusion: false,
+    tiers: {},
     profiles: { reviewer: { capability: "read-only", model: "profile-model", instructions: "Review." } },
     personas: { concise: { instructions: "Be concise.", model: "persona-model", isolation: "worktree" } },
   };
@@ -164,6 +166,82 @@ test("profile resolution applies explicit overrides before profile and persona d
     thinking: undefined,
     isolation: "worktree",
     childOptions: { runtime: "in-process", tools: undefined, skills: true, contextFiles: true, extensions: true },
+  });
+});
+
+function withAgentDir(run: (cwd: string) => void) {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagent-config-test-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagent-agent-dir-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    run(cwd);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+}
+
+test("fusion mode is off by default and adds tiered profiles when enabled", () => {
+  withAgentDir((cwd) => {
+    const off = loadSubagentConfig(cwd, true);
+    assert.equal(off.fusion, false);
+    assert.equal(off.profiles.sidekick, undefined);
+    assert.equal(off.profiles.explore?.tier, undefined);
+
+    saveConfigDocument("global", cwd, JSON.stringify({ fusion: true }));
+    const on = loadSubagentConfig(cwd, true);
+    assert.equal(on.fusion, true);
+    assert.deepEqual(
+      Object.fromEntries(["sidekick", "explore", "reviewer", "worker", "verifier", "general-purpose"].map((name) => [name, on.profiles[name]?.tier])),
+      { sidekick: "medium", explore: "medium", reviewer: "medium", worker: "light", verifier: "light", "general-purpose": "heavy" },
+    );
+    assert.equal(on.profiles.verifier?.capability, "execute");
+    assert.equal(on.profiles.explore?.capability, "execute");
+    assert.match(on.profiles.explore?.instructions ?? "", /Do not modify files/);
+
+    saveConfigDocument("project", cwd, JSON.stringify({ fusion: false }));
+    assert.equal(loadSubagentConfig(cwd, true).profiles.sidekick, undefined);
+    assert.equal(loadSubagentConfig(cwd, false).profiles.sidekick?.tier, "medium");
+
+    // Resuming a Fusion child still works after the mode is off, without changing other profiles.
+    const resumable = loadSubagentConfig(cwd, true, { resumable: true });
+    assert.equal(resumable.fusion, false);
+    assert.equal(resumable.profiles.sidekick?.tier, "medium");
+    assert.equal(resumable.profiles.explore?.tier, undefined);
+  });
+});
+
+test("tiers supply model and thinking below profile and call overrides", () => {
+  withAgentDir((cwd) => {
+    saveConfigDocument("global", cwd, JSON.stringify({
+      fusion: true,
+      tiers: { light: { model: "light/model", thinking: "low" }, medium: { model: "medium/model" } },
+      profiles: { worker: { thinking: "minimal" }, custom: { tier: "light" } },
+    }));
+    const config = loadSubagentConfig(cwd, true);
+    assert.deepEqual(config.tiers, { light: { model: "light/model", thinking: "low" }, medium: { model: "medium/model" } });
+    const pick = (agentType: string, extra: { model?: string } = {}) => {
+      const { model, thinking } = resolveProfile(config, { agentType, ...extra });
+      return { model, thinking };
+    };
+    assert.deepEqual(pick("sidekick"), { model: "medium/model", thinking: undefined });
+    assert.deepEqual(pick("worker"), { model: "light/model", thinking: "minimal" });
+    assert.deepEqual(pick("custom", { model: "call/model" }), { model: "call/model", thinking: "low" });
+    assert.deepEqual(pick("general-purpose"), { model: undefined, thinking: undefined });
+    // User fields merge over the Fusion defaults instead of replacing them.
+    assert.match(config.profiles.worker?.instructions ?? "", /bounded edit/);
+  });
+});
+
+test("fusion and tier settings are validated when saved", () => {
+  withAgentDir((cwd) => {
+    assert.throws(() => saveConfigDocument("global", cwd, JSON.stringify({ fusion: "yes" })), /fusion must be true or false/);
+    assert.throws(() => saveConfigDocument("global", cwd, JSON.stringify({ tiers: { huge: {} } })), /Unknown tier "huge"/);
+    assert.throws(() => saveConfigDocument("global", cwd, JSON.stringify({ tiers: { light: { thinking: "lots" } } })), /tiers.light.thinking/);
+    assert.throws(() => saveConfigDocument("global", cwd, JSON.stringify({ profiles: { a: { tier: "huge" } } })), /tier must be one of/);
   });
 });
 

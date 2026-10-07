@@ -1,16 +1,25 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { ReasoningEffort } from "./domain.ts";
+import { REASONING_EFFORTS, type ReasoningEffort } from "./domain.ts";
+import { FUSION_PROFILES } from "./fusion.ts";
 
 export const AGENT_TYPES = ["general-purpose", "explore", "plan"] as const;
 export const CAPABILITY_MODES = ["read-only", "read-write", "execute", "all"] as const;
 export const ISOLATION_MODES = ["none", "worktree"] as const;
 export const RUNTIME_MODES = ["in-process", "process"] as const;
+export const TIERS = ["light", "medium", "heavy"] as const;
 
 export type CapabilityMode = (typeof CAPABILITY_MODES)[number];
 export type IsolationMode = (typeof ISOLATION_MODES)[number];
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
+export type Tier = (typeof TIERS)[number];
+
+/** Model and thinking level for one tier; unset fields inherit the parent session's. */
+export interface TierSetting {
+  model?: string;
+  thinking?: ReasoningEffort;
+}
 
 export interface AgentProfile {
   description?: string;
@@ -18,6 +27,8 @@ export interface AgentProfile {
   capability?: CapabilityMode;
   model?: string;
   thinking?: ReasoningEffort;
+  /** Take model and thinking from this tier when the profile sets neither. */
+  tier?: Tier;
   isolation?: IsolationMode;
   /** "process" runs the child as a separate `pi --mode rpc` process with Pi's built-in extensions. */
   runtime?: RuntimeMode;
@@ -48,6 +59,9 @@ export interface PersonaProfile {
 
 export interface SubagentConfig {
   maxConcurrent: number;
+  /** Adds the Fusion profiles and lets the main session delegate without being asked. */
+  fusion: boolean;
+  tiers: Partial<Record<Tier, TierSetting>>;
   profiles: Record<string, AgentProfile>;
   personas: Record<string, PersonaProfile>;
 }
@@ -71,6 +85,8 @@ const BUILTIN_PROFILES: Record<string, AgentProfile> = {
 
 const DEFAULT_CONFIG: SubagentConfig = {
   maxConcurrent: 50,
+  fusion: false,
+  tiers: {},
   profiles: BUILTIN_PROFILES,
   personas: {},
 };
@@ -108,8 +124,10 @@ function parseProfile(value: unknown): AgentProfile | undefined {
   const capability = enumValue(value.capability, CAPABILITY_MODES);
   if (capability) profile.capability = capability;
   if (typeof value.model === "string") profile.model = value.model;
-  const thinking = enumValue(value.thinking, ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+  const thinking = enumValue(value.thinking, REASONING_EFFORTS);
   if (thinking) profile.thinking = thinking;
+  const tier = enumValue(value.tier, TIERS);
+  if (tier) profile.tier = tier;
   const isolation = enumValue(value.isolation, ISOLATION_MODES);
   if (isolation) profile.isolation = isolation;
   const runtime = enumValue(value.runtime, RUNTIME_MODES);
@@ -135,6 +153,21 @@ function parsePersona(value: unknown): PersonaProfile | undefined {
   };
 }
 
+function parseTiers(base: SubagentConfig["tiers"], value: unknown): SubagentConfig["tiers"] {
+  if (!isRecord(value)) return base;
+  const tiers = { ...base };
+  for (const tier of TIERS) {
+    const entry = value[tier];
+    if (!isRecord(entry)) continue;
+    const setting: TierSetting = { ...tiers[tier] };
+    if (typeof entry.model === "string" && entry.model.trim()) setting.model = entry.model.trim();
+    const thinking = enumValue(entry.thinking, REASONING_EFFORTS);
+    if (thinking) setting.thinking = thinking;
+    tiers[tier] = setting;
+  }
+  return tiers;
+}
+
 function mergeConfig(base: SubagentConfig, raw: Record<string, unknown> | undefined): SubagentConfig {
   if (!raw) return base;
   const profiles = { ...base.profiles };
@@ -153,6 +186,8 @@ function mergeConfig(base: SubagentConfig, raw: Record<string, unknown> | undefi
   }
   return {
     maxConcurrent: boundedInt(raw.maxConcurrent, base.maxConcurrent, 1, 50),
+    fusion: typeof raw.fusion === "boolean" ? raw.fusion : base.fusion,
+    tiers: parseTiers(base.tiers, raw.tiers),
     profiles,
     personas,
   };
@@ -195,13 +230,13 @@ function validateProfileDocument(name: string, value: unknown, persona: boolean)
   if (value.model !== undefined && typeof value.model !== "string") {
     throw new Error(`${name}.model must be a string.`);
   }
-  if (
-    value.thinking !== undefined &&
-    !enumValue(value.thinking, ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)
-  ) {
+  if (value.thinking !== undefined && !enumValue(value.thinking, REASONING_EFFORTS)) {
     throw new Error(`${name}.thinking is invalid.`);
   }
   if (persona) return;
+  if (value.tier !== undefined && !enumValue(value.tier, TIERS)) {
+    throw new Error(`${name}.tier must be one of ${TIERS.join(", ")}.`);
+  }
   if (value.runtime !== undefined && !enumValue(value.runtime, RUNTIME_MODES)) {
     throw new Error(`${name}.runtime must be one of ${RUNTIME_MODES.join(", ")}.`);
   }
@@ -230,6 +265,22 @@ export function saveConfigDocument(scope: ConfigScope, cwd: string, text: string
   ) {
     throw new Error("maxConcurrent must be an integer from 1 to 50.");
   }
+  if (raw.fusion !== undefined && typeof raw.fusion !== "boolean") {
+    throw new Error("fusion must be true or false.");
+  }
+  if (raw.tiers !== undefined) {
+    if (!isRecord(raw.tiers)) throw new Error("tiers must be an object keyed by light, medium, or heavy.");
+    for (const [tier, value] of Object.entries(raw.tiers)) {
+      if (!enumValue(tier, TIERS)) throw new Error(`Unknown tier "${tier}"; use ${TIERS.join(", ")}.`);
+      if (!isRecord(value)) throw new Error(`tiers.${tier} must be an object.`);
+      if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+        throw new Error(`tiers.${tier}.model must be a non-empty string.`);
+      }
+      if (value.thinking !== undefined && !enumValue(value.thinking, REASONING_EFFORTS)) {
+        throw new Error(`tiers.${tier}.thinking is invalid.`);
+      }
+    }
+  }
   if (raw.profiles !== undefined && !isRecord(raw.profiles)) {
     throw new Error("profiles must be an object keyed by profile name.");
   }
@@ -250,12 +301,29 @@ export function saveConfigDocument(scope: ConfigScope, cwd: string, text: string
   fs.chmodSync(file, 0o600);
 }
 
-export function loadSubagentConfig(cwd: string, projectTrusted: boolean): SubagentConfig {
-  let config = mergeConfig(DEFAULT_CONFIG, readJson(subagentConfigPath("global", cwd)));
-  if (projectTrusted) {
-    config = mergeConfig(config, readJson(subagentConfigPath("project", cwd)));
+/**
+ * `resumable` also defines Fusion profiles that no file defines, so a child
+ * started under Fusion mode can be continued after the mode is turned off.
+ */
+export function loadSubagentConfig(cwd: string, projectTrusted: boolean, options: { resumable?: boolean } = {}): SubagentConfig {
+  const global = readJson(subagentConfigPath("global", cwd));
+  const project = projectTrusted ? readJson(subagentConfigPath("project", cwd)) : undefined;
+  // Fusion profiles sit under user documents so either file can tune them.
+  const fusion = [project?.fusion, global?.fusion].find((value) => typeof value === "boolean") ?? DEFAULT_CONFIG.fusion;
+  const base = fusion ? withFusionProfiles(DEFAULT_CONFIG) : DEFAULT_CONFIG;
+  const config = mergeConfig(mergeConfig(base, global), project);
+  if (fusion || !options.resumable) return config;
+  const profiles = { ...config.profiles };
+  for (const [name, profile] of Object.entries(FUSION_PROFILES)) profiles[name] ??= profile;
+  return { ...config, profiles };
+}
+
+function withFusionProfiles(config: SubagentConfig): SubagentConfig {
+  const profiles = { ...config.profiles };
+  for (const [name, profile] of Object.entries(FUSION_PROFILES)) {
+    profiles[name] = { ...profiles[name], ...profile };
   }
-  return config;
+  return { ...config, profiles };
 }
 
 export function resolveProfile(
@@ -280,13 +348,14 @@ export function resolveProfile(
     throw new Error(`Unknown persona "${personaName}". Available: ${Object.keys(config.personas).join(", ") || "none"}.`);
   }
   const instructions = [profile.instructions, persona?.instructions].filter(Boolean).join("\n\n");
+  const tier = profile.tier ? config.tiers[profile.tier] : undefined;
   return {
     agentType,
     persona: personaName,
     instructions,
     capability: options.capability ?? profile.capability ?? "all",
-    model: options.model ?? profile.model ?? persona?.model,
-    thinking: options.thinking ?? profile.thinking ?? persona?.thinking,
+    model: options.model ?? profile.model ?? tier?.model ?? persona?.model,
+    thinking: options.thinking ?? profile.thinking ?? tier?.thinking ?? persona?.thinking,
     isolation: options.isolation ?? profile.isolation ?? persona?.isolation ?? "none",
     childOptions: {
       runtime: profile.runtime ?? "in-process",

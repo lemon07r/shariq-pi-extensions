@@ -1,6 +1,6 @@
 ---
 name: subagents
-description: Use only when the user explicitly asks Pi to use subagents, delegate work, run agents in parallel, or explicitly names this skill. Do not invoke merely because a task is large, complex, multi-domain, or potentially parallelizable.
+description: Use only when the user explicitly asks Pi to use subagents, delegate work, run agents in parallel, or explicitly names this skill, or when Fusion mode is on. Do not invoke merely because a task is large, complex, multi-domain, or potentially parallelizable.
 compatibility: Pi with the Pi-only subagents extension and its spawn, task, messaging, question, profile, dashboard, and worktree tools.
 ---
 
@@ -10,7 +10,7 @@ Pi child agents each get their own context window and persistent session, cannot
 
 ## Activation boundary
 
-Delegate only when the user explicitly asks for it. Task size or convenience is not authorization. If the user asks only to set up or explain delegation, do not start productive work beyond that request.
+Delegate only when the user explicitly asks for it. Task size or convenience is not authorization. The exception is Fusion mode (`"fusion": true` in `subagents.json`): the user has already authorized delegation, and the `fusion` skill decides what to hand off. If the user asks only to set up or explain delegation, do not start productive work beyond that request.
 
 ## Choose the operation
 
@@ -56,7 +56,7 @@ Give each child the narrowest capability that can finish the work:
 - `read-write`: inspection plus direct file edits, without command execution.
 - `all`: everything, including extension tools no other mode allows. Use it only when the work needs that.
 
-Use an existing profile or persona when one fits; check `list_agent_profiles` rather than inventing names. Omit model and thinking overrides so children inherit the parent's. Never move children to a more expensive model or higher thinking level unless the user asked; a batch of ten children multiplies that cost by ten. When an override is needed, use only a provider and model the current Pi registry exposes.
+Use an existing profile or persona when one fits; check `list_agent_profiles` rather than inventing names. Omit model and thinking overrides so children inherit the parent's, or the tier the user configured for their profile. Never move children to a more expensive model or higher thinking level unless the user asked; a batch of ten children multiplies that cost by ten. When an override is needed, use only a provider and model the current Pi registry exposes.
 
 Keep `isolation` at `none` for read-only work and for writers with clearly separate files. When two or more children will write concurrently in a repository that compiles or typechecks, give each writer `isolation: "worktree"`, because half-finished edits in one checkout break each other's builds. Worktree isolation needs a clean source checkout; commit or stash first, or run the writers one after another. Isolation does not authorize publishing.
 

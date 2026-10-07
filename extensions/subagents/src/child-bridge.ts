@@ -11,6 +11,7 @@ import { Type } from "typebox";
 import { CHILD_EXCLUDED_TOOL_NAMES } from "../../shared/child-session.ts";
 import { childToolAllowed } from "./backends/pi.ts";
 import type { CapabilityMode } from "./config.ts";
+import { hideFusionSkill } from "./fusion.ts";
 
 export const CHILD_ENV = "PI_SUBAGENT_CHILD";
 export const CHILD_CAPABILITY_ENV = "PI_SUBAGENT_CAPABILITY";
@@ -50,6 +51,7 @@ export default function childBridge(pi: ExtensionAPI) {
   };
   pi.on("session_start", restrict);
   pi.on("agent_start", restrict);
+  hideFusionSkill(pi);
 
   if (process.env[CHILD_BRIDGE_ENV] !== "1") return;
   pi.registerTool({

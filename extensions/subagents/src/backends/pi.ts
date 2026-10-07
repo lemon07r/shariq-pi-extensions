@@ -37,6 +37,7 @@ import {
   shutdownAndDisposeChildSession,
 } from "../../../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
+import { hideFusionSkill } from "../fusion.ts";
 import { makeProcessSession } from "./pi-process.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -457,7 +458,7 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources({
           cwd: task.cwd,
           projectTrusted: task.parent.projectTrusted,
-          extensionFactories: [capabilityGuardExtension(task.capability, task.childOptions?.tools)],
+          extensionFactories: [capabilityGuardExtension(task.capability, task.childOptions?.tools), hideFusionSkill],
           noSkills: task.childOptions?.skills === false,
           noContextFiles: task.childOptions?.contextFiles === false,
           noExtensions: task.childOptions?.extensions === false,

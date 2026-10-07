@@ -1,6 +1,6 @@
 {
   "name": "shariq-pi-extensions",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Cross-platform extension suite for the Pi coding agent.",
   "license": "MIT",
   "author": "Shariq Riaz",
@@ -52,6 +52,7 @@
     ],
     "skills": [
       "./skills/background-terminals",
+      "./skills/fusion",
       "./skills/subagents"
     ],
     "themes": [

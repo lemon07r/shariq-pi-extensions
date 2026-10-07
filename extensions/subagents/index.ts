@@ -68,6 +68,7 @@ import {
   type IsolationMode,
 } from "./src/config.ts";
 import { buildTaskPrompt, forkConversation, parseForkTurns } from "./src/context.ts";
+import { FUSION_LEAD_GUIDELINE, isFusionSkill } from "./src/fusion.ts";
 import {
   applyAgentWorktree,
   applyAgentWorktreeTo,
@@ -375,7 +376,7 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     options: SpawnOptions,
   ): Promise<PreparedSpawn> => {
-    const config = loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted());
+    const config = loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted(), { resumable: Boolean(options.resumeFrom) });
     const liveSource = options.resumeFrom ? manager.view.get(options.resumeFrom) : undefined;
     if (liveSource?.status === "running") {
       throw new Error(`Cannot resume running subagent "${options.resumeFrom}"; use send_message instead.`);
@@ -481,8 +482,8 @@ export default function (pi: ExtensionAPI) {
         title,
         origin: options.origin ?? "model",
         cwd,
-        model: resumeSessionFile ? options.model : profile.model,
-        reasoningEffort: resumeSessionFile ? options.thinking : profile.thinking,
+        model: profile.model,
+        reasoningEffort: profile.thinking,
         capability: profile.capability,
         childOptions: profile.childOptions,
         agentType: profile.agentType,
@@ -694,6 +695,20 @@ export default function (pi: ExtensionAPI) {
     // Disposing the runtime runs the manager finalizer and closes all child
     // Pi session scopes.
     await closing?.dispose();
+  });
+
+  // Fusion mode swaps the lead's activation rule and reveals the fusion skill.
+  // Children never have spawn_agent; they also hide the skill through hideFusionSkill.
+  pi.on("before_agent_start", (event, ctx) => {
+    const options = event.systemPromptOptions;
+    const lead = options.selectedTools.includes("spawn_agent");
+    const fusion = lead && loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted()).fusion;
+    if (fusion && options.toolGuidelines.spawn_agent) {
+      options.toolGuidelines.spawn_agent = options.toolGuidelines.spawn_agent.map((guideline) =>
+        guideline === SUBAGENT_SPAWN_PROMPT_GUIDELINES[0] ? FUSION_LEAD_GUIDELINE : guideline,
+      );
+    }
+    if (!fusion) options.skills = options.skills.filter((skill) => !isFusionSkill(skill.baseDir));
   });
 
   // --- Tools -------------------------------------------------------------
@@ -1029,7 +1044,10 @@ export default function (pi: ExtensionAPI) {
       const config = loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted());
       const profileLines = Object.entries(config.profiles).map(
         ([name, profile]) =>
-          `profile ${name}: ${profile.description ?? "no description"}; capability=${profile.capability ?? "all"}; isolation=${profile.isolation ?? "none"}`,
+          `profile ${name}: ${profile.description ?? "no description"}; capability=${profile.capability ?? "all"}; isolation=${profile.isolation ?? "none"}${profile.tier ? `; tier=${profile.tier}` : ""}`,
+      );
+      const tierLines = Object.entries(config.tiers).map(
+        ([tier, setting]) => `tier ${tier}: model=${setting?.model ?? "parent"}; thinking=${setting?.thinking ?? "parent"}`,
       );
       const personaLines = Object.entries(config.personas).map(
         ([name, persona]) => `persona ${name}: ${persona.description ?? "no description"}`,
@@ -1037,9 +1055,9 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{
           type: "text",
-          text: [`maxConcurrent=${config.maxConcurrent}`, ...profileLines, ...personaLines].join("\n"),
+          text: [`maxConcurrent=${config.maxConcurrent}`, `fusion=${config.fusion ? "on" : "off"}`, ...tierLines, ...profileLines, ...personaLines].join("\n"),
         }],
-        details: { maxConcurrent: config.maxConcurrent, profiles: config.profiles, personas: config.personas },
+        details: { maxConcurrent: config.maxConcurrent, fusion: config.fusion, tiers: config.tiers, profiles: config.profiles, personas: config.personas },
       };
     },
     renderCall(_args, theme) {
@@ -1431,9 +1449,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("subagents", {
-    description: "Inspect agents, peer messages, profiles, or configuration",
+    description: "Inspect agents, peer messages, profiles, or configuration, or switch Fusion mode",
     getArgumentCompletions: (prefix) =>
-      ["agents", "peers", "profiles", "config"]
+      ["agents", "peers", "profiles", "config", "fusion", "fusion on", "fusion off"]
         .filter((value) => value.startsWith(prefix.trim()))
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
@@ -1462,6 +1480,33 @@ export default function (pi: ExtensionAPI) {
         }
         return;
       }
+      if (action === "fusion" || action.startsWith("fusion ")) {
+        const value = action.slice("fusion".length).trim();
+        const enabled = () => loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted()).fusion;
+        if (!value) {
+          ctx.ui.notify(`Fusion mode is ${enabled() ? "on" : "off"}. Use /subagents fusion on or off.`, "info");
+          return;
+        }
+        if (value !== "on" && value !== "off") {
+          ctx.ui.notify("Use /subagents fusion on or off", "error");
+          return;
+        }
+        try {
+          const document = JSON.parse(loadConfigDocument("global", ctx.cwd)) as Record<string, unknown>;
+          document.fusion = value === "on";
+          saveConfigDocument("global", ctx.cwd, JSON.stringify(document));
+          const overridden = enabled() !== (value === "on");
+          ctx.ui.notify(
+            overridden
+              ? `Saved fusion ${value} globally, but this project's .pi/subagents.json overrides it`
+              : `Fusion mode ${value}; it applies from your next message`,
+            overridden ? "warning" : "info",
+          );
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
       const manager = await getManager();
       if (action === "peers") {
         await openPeerMessageViewer(ctx, manager.view);
@@ -1470,6 +1515,7 @@ export default function (pi: ExtensionAPI) {
       if (action === "profiles") {
         const config = loadSubagentConfig(ctx.cwd, ctx.isProjectTrusted());
         const entries = [
+          { label: `fusion: ${config.fusion ? "on" : "off"} · tiers`, text: JSON.stringify({ fusion: config.fusion, tiers: config.tiers }, null, 2) },
           ...Object.entries(config.profiles).map(([name, value]) => ({
             label: `profile: ${name}`,
             text: JSON.stringify(value, null, 2),
@@ -1485,7 +1531,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (action !== "agents") {
-        ctx.ui.notify('Use /subagents agents, peers, profiles, or config', "error");
+        ctx.ui.notify('Use /subagents agents, peers, profiles, config, or fusion', "error");
         return;
       }
       if (manager.view.size() === 0) {

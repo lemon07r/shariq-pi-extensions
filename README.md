@@ -23,7 +23,7 @@ Run `/reload` in an existing Pi session after installation; new sessions load th
 - structured user questions (`ask_user`)
 - persistent goals with evidence checklists and budgets
 - a task list for multi-deliverable work, with a live progress dock
-- Pi subagents with profiles, worktree isolation, and a takeover dashboard
+- Pi subagents with profiles, worktree isolation, a takeover dashboard, and an optional Fusion mode (lead plus persistent sidekick across light, medium, and heavy model tiers)
 - Smart Compaction: structured checkpoints with file and worktree state
 - managed background terminals
 - Firecrawl web search, scraping, and developer search
@@ -33,7 +33,7 @@ Run `/reload` in an existing Pi session after installation; new sessions load th
 - configurable steer, interrupt, or follow-up Enter behavior
 - `/exit` as an alias for `/quit`
 
-The package also ships the `ember-warm-dark` theme and the `background-terminals` and `subagents` skills. Pi loads the skills from the installed package; copying them into `<agent-dir>/skills` would leave stale duplicates after removal.
+The package also ships the `ember-warm-dark` theme and the `background-terminals`, `fusion`, and `subagents` skills. Pi loads the skills from the installed package; copying them into `<agent-dir>/skills` would leave stale duplicates after removal.
 
 The suite is developed and tested against Pi 1.0. See [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) for commands, tools, configuration, and external dependencies.
 

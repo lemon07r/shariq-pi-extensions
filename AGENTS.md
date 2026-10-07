@@ -16,7 +16,7 @@ This public repository packages the user's Pi extensions as one suite distribute
 - Declare every extension entrypoint explicitly in root `package.json#pi.extensions`; do not rely on directory auto-discovery.
 - Keep each extension under `extensions/<name>` in the single root package so `pi config` can enable or disable it individually. Do not create nested Pi packages for suite extensions.
 - Every directory under `extensions/` must have a README. Every declared extension needs a `*.test.ts` file; `scripts/run-tests.mjs` discovers them for `bun run validate`.
-- Keep `skills/background-terminals` and `skills/subagents` aligned with their extension APIs; Pi loads them from the package and install scripts must not copy them elsewhere.
+- Keep `skills/background-terminals`, `skills/fusion`, and `skills/subagents` aligned with their extension APIs; Pi loads them from the package and install scripts must not copy them elsewhere.
 - Put third-party runtime modules in root `dependencies`. Pi-owned packages and `typebox` remain optional peer dependencies and pinned development dependencies.
 - When dependencies change, refresh both `bun.lock` (CI) and `package-lock.json` (Pi's npm-based Git installs) with `npm install --package-lock-only --ignore-scripts`.
 - Keep shared runtime helpers in `extensions/shared`; do not duplicate them across extensions, and delete shared modules nothing imports.
