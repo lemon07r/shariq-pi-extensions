@@ -111,7 +111,9 @@ try {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const pack = JSON.parse(packJson)?.[0];
+  // npm 11 and earlier return an array; npm 12 returns an object keyed by package name.
+  const parsedPack = JSON.parse(packJson);
+  const pack = Array.isArray(parsedPack) ? parsedPack[0] : parsedPack?.[manifest.name] ?? Object.values(parsedPack ?? {})[0];
   const packedFiles = Array.isArray(pack?.files) ? pack.files.map((file) => file.path) : [];
   if (packedFiles.length === 0) errors.push("npm pack returned no files");
   for (const filename of packedFiles) {
