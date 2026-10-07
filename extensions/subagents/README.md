@@ -46,9 +46,20 @@ Capability modes:
 
 Restrictive modes fail closed: an extension tool is unavailable until it is classified in `src/backends/pi.ts`, and a child-only `tool_call` check refuses unclassified tools at call time, including tools registered later. The session-only `task_list` tool is allowed in every mode.
 
-Children load the same packages and extensions as the parent but not Pi's built-in extensions (`codemode`, MCP, and tool search), because Pi does not export them to extensions.
+## Runtimes and review options
 
-Each tool call inside a child times out after three minutes.
+Children run in-process by default: fast to start and light on memory. In-process children load the same packages and extensions as the parent but not Pi's built-in extensions (`codemode`, MCP, and tool search), because Pi does not export them to extensions. Each tool call inside an in-process child times out after three minutes.
+
+A profile with `"runtime": "process"` runs each child as its own `pi --mode rpc` process instead. The child gets the full Pi setup, including the built-in extensions, and a crash or memory blowup stays in the child. The cost is a second or two of startup and a separate process per child. A child-only extension loaded with `-e` enforces the capability inside the process and carries `message_parent`, `ask_parent`, `list_peers`, and `message_peer` over Pi's RPC dialog protocol. Closing the parent closes the child's input, and the child shuts down.
+
+`codemode` and `tool_search` are allowed in every capability mode; each tool a codemode script calls passes the same check, so a script cannot widen a child's capability.
+
+Profiles can also shape what the child starts with. None of these settings reach the model:
+
+- `"tools": ["read", "grep"]`: an exact allowlist on top of the capability;
+- `"skills": false`: start without skills;
+- `"contextFiles": false`: start without `AGENTS.md` and `CLAUDE.md` files, for an unbiased review;
+- `"extensions": false`: start without discovered extensions.
 
 User profiles and personas live in `<agent-dir>/subagents.json`. Trusted projects can override them in `.pi/subagents.json`:
 
@@ -60,6 +71,12 @@ User profiles and personas live in `<agent-dir>/subagents.json`. Trusted project
       "description": "Review changes without editing",
       "instructions": "Find correctness and regression risks. Cite files and lines.",
       "capability": "execute"
+    },
+    "fresh-eyes": {
+      "description": "Independent review that ignores repository instructions",
+      "capability": "execute",
+      "runtime": "process",
+      "contextFiles": false
     }
   },
   "personas": {
@@ -100,7 +117,9 @@ Lifecycle tools render as compact cards with expandable detail. Running children
 ## Layout
 
 - `src/manager.ts`: Effect service, lifecycle, snapshots, cancellation, and retention
-- `src/backends/pi.ts`: in-process Pi child sessions, capability filtering, context seeding, resume, and the parent bridge
+- `src/backends/pi.ts`: in-process Pi child sessions, capability filtering, shared event translation, context seeding, resume, and the parent bridge
+- `src/backends/pi-process.ts`: process-runtime children over Pi's RPC protocol
+- `src/child-bridge.ts`: the extension loaded into process-runtime children for capability enforcement and the parent bridge
 - `src/config.ts`: profiles, personas, validation, and limits
 - `src/catalog.ts`: global resumable-agent catalog
 - `src/context.ts`: context forks and profile prompt assembly

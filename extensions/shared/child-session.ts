@@ -38,6 +38,10 @@ export interface ChildResourceOptions {
   agentDir?: string;
   /** Child-only extensions, such as a capability guard, loaded beside the normal ones. */
   extensionFactories?: InlineExtension[];
+  /** Start without discovered skills, AGENTS.md files, or extensions (inline factories still load). */
+  noSkills?: boolean;
+  noContextFiles?: boolean;
+  noExtensions?: boolean;
 }
 
 /** Load normal global/package resources and trust-gated project resources. */
@@ -54,6 +58,9 @@ export async function createChildResources(options: ChildResourceOptions) {
       ? { appendSystemPrompt: options.appendSystemPrompt }
       : {}),
     ...(options.extensionFactories ? { extensionFactories: options.extensionFactories } : {}),
+    noSkills: options.noSkills,
+    noContextFiles: options.noContextFiles,
+    noExtensions: options.noExtensions,
   });
   await loader.reload();
   return { loader, settingsManager };

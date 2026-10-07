@@ -9,7 +9,7 @@
 import type { Message, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Data } from "effect";
-import type { CapabilityMode, IsolationMode } from "./config.ts";
+import type { CapabilityMode, ChildSessionOptions, IsolationMode } from "./config.ts";
 import type { WorktreeInfo } from "./worktree.ts";
 
 export type BackendName = "pi";
@@ -71,6 +71,8 @@ export interface SpawnTask {
   readonly reasoningEffort?: ReasoningEffort;
   /** Coarse tool capability policy, resolved from profile/persona/override. */
   readonly capability: CapabilityMode;
+  /** Runtime, tool allowlist, and resource switches from the profile. */
+  readonly childOptions?: ChildSessionOptions;
   readonly agentType: string;
   readonly persona?: string;
   readonly isolation: IsolationMode;

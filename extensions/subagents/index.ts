@@ -102,6 +102,7 @@ import {
   upsertSubagentCatalog,
   type ArchivedSubagent,
 } from "./src/catalog.ts";
+import { CHILD_ENV } from "./src/child-bridge.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
@@ -175,6 +176,8 @@ function truncatedOutput(
 }
 
 export default function (pi: ExtensionAPI) {
+  // A process-runtime child is managed by its parent; it must not manage children itself.
+  if (process.env[CHILD_ENV] === "1") return;
   const deliverSettlement = settlementDelivery(pi);
   let runtime: SubagentRuntime | undefined;
   let managerPromise: Promise<SubagentManagerShape> | undefined;
@@ -481,6 +484,7 @@ export default function (pi: ExtensionAPI) {
         model: resumeSessionFile ? options.model : profile.model,
         reasoningEffort: resumeSessionFile ? options.thinking : profile.thinking,
         capability: profile.capability,
+        childOptions: profile.childOptions,
         agentType: profile.agentType,
         persona: profile.persona,
         isolation: profile.isolation,

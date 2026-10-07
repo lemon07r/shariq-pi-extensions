@@ -18,7 +18,7 @@ Persistent, branch-safe objectives with an evidence checklist, token budgets, pa
 
 ### [Subagents](../extensions/subagents/README.md)
 
-Flat Pi child agents with profiles, capability policies, context forks, resumable sessions, optional git worktree isolation, peer messaging, and a takeover dashboard. Children cannot start agents. The model delegates only when the user asks. Results are delivered as custom messages that start a parent turn when the parent is idle. Configuration lives in `<agent-dir>/subagents.json`, with trusted-project overrides in `.pi/subagents.json`.
+Flat Pi child agents with profiles, capability policies, an optional per-profile process runtime that gives children Pi's built-in extensions (codemode, MCP, tool search), review options that drop skills or `AGENTS.md` files, context forks, resumable sessions, optional git worktree isolation, peer messaging, and a takeover dashboard. Children cannot start agents. The model delegates only when the user asks. Results are delivered as custom messages that start a parent turn when the parent is idle. Configuration lives in `<agent-dir>/subagents.json`, with trusted-project overrides in `.pi/subagents.json`.
 
 ### [Smart Compaction](../extensions/smart-compaction/README.md)
 

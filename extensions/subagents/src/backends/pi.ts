@@ -37,6 +37,7 @@ import {
   shutdownAndDisposeChildSession,
 } from "../../../shared/child-session.ts";
 import { createToolCallTimeoutGuard } from "../../../shared/tool-call-timeout.ts";
+import { makeProcessSession } from "./pi-process.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 
@@ -70,6 +71,11 @@ const READ_CAPABILITY_TOOLS = new Set([
   "ask_parent",
   "list_peers",
   "message_peer",
+  // Pi built-ins that process-runtime children load. Each tool a codemode
+  // script calls passes the same tool_call check, and tool_search only finds
+  // tools, so neither can widen a child's capability.
+  "codemode",
+  "tool_search",
 ]);
 
 const WRITE_CAPABILITY_TOOLS = new Set(["write", "edit"]);
@@ -96,27 +102,40 @@ export function filterToolsForCapability(
   });
 }
 
+/** True when a child with this capability and optional exact allowlist may use the tool. */
+export function childToolAllowed(
+  name: string,
+  capability: SpawnTask["capability"],
+  allowlist?: ReadonlyArray<string>,
+): boolean {
+  if (allowlist && !allowlist.includes(name)) return false;
+  return filterToolsForCapability([name], capability).length > 0;
+}
+
 /**
- * Keep a restrictive child inside its capability for its whole life. A child-only
- * tool_call blocker refuses every unclassified tool, including tools registered
- * after startup and nested codemode calls; the loadout filter keeps them out of
- * the model's view. Tool definitions are never mutated because Pi shares them
- * by reference with the parent session.
+ * Keep a child inside its capability and allowlist for its whole life. A
+ * child-only tool_call blocker refuses every disallowed tool, including tools
+ * registered after startup and nested codemode calls; the loadout filter keeps
+ * them out of the model's view. Tool definitions are never mutated because Pi
+ * shares them by reference with the parent session.
  */
-export function capabilityGuardExtension(capability: SpawnTask["capability"]): ExtensionFactory {
+export function capabilityGuardExtension(
+  capability: SpawnTask["capability"],
+  allowlist?: ReadonlyArray<string>,
+): ExtensionFactory {
   return (pi) => {
-    if (capability === "all") return;
+    if (capability === "all" && !allowlist) return;
     pi.on("tool_call", (event) => {
-      if (filterToolsForCapability([event.toolName], capability).length) return undefined;
-      return { block: true, reason: `Tool "${event.toolName}" is not permitted for a ${capability} subagent.` };
+      if (childToolAllowed(event.toolName, capability, allowlist)) return undefined;
+      return { block: true, reason: `Tool "${event.toolName}" is not permitted for this subagent.` };
     });
   };
 }
 
-function restrictActiveTools(session: AgentSession, capability: SpawnTask["capability"]) {
-  if (capability === "all") return;
+function restrictActiveTools(session: AgentSession, capability: SpawnTask["capability"], allowlist?: ReadonlyArray<string>) {
+  if (capability === "all" && !allowlist) return;
   const active = session.getActiveToolNames();
-  const allowed = filterToolsForCapability(active, capability);
+  const allowed = active.filter((name) => childToolAllowed(name, capability, allowlist));
   if (allowed.length !== active.length) session.setActiveToolsByName(allowed);
 }
 
@@ -249,11 +268,10 @@ function messageRole(msg: unknown): Message["role"] | undefined {
   return undefined;
 }
 
-function lastAssistantMessage(
-  session: AgentSession,
+export function lastAssistantMessage(
+  messages: ReadonlyArray<unknown>,
   fromIndex = 0,
 ): AssistantMessage | undefined {
-  const messages = session.messages;
   for (let i = messages.length - 1; i >= fromIndex; i--) {
     const msg = messages[i];
     if (messageRole(msg) === "assistant") return msg as AssistantMessage;
@@ -262,8 +280,7 @@ function lastAssistantMessage(
 }
 
 /** Final assistant text output (last assistant message with text), v1 semantics. */
-function finalOutput(session: AgentSession, fromIndex = 0): string {
-  const messages = session.messages;
+export function finalOutput(messages: ReadonlyArray<unknown>, fromIndex = 0): string {
   for (let i = messages.length - 1; i >= fromIndex; i--) {
     const msg = messages[i];
     if (messageRole(msg) !== "assistant") continue;
@@ -347,7 +364,68 @@ function userText(msg: Message): string {
 
 // --- The session ------------------------------------------------------------------
 
-function boundedError(error: unknown) {
+/**
+ * Translate the Pi session events both runtimes share into subagent events.
+ * Run lifecycle, usage, and metadata stay with each runtime.
+ */
+export function translateSessionEvent(
+  event: { type: string; [key: string]: any },
+  emit: (event: SubagentEvent) => void,
+): void {
+  switch (event.type) {
+    case "message_update": {
+      const streamEvent = event.assistantMessageEvent;
+      if (streamEvent?.type === "text_delta") emit({ _tag: "AssistantDelta", kind: "text", delta: streamEvent.delta });
+      else if (streamEvent?.type === "thinking_delta") emit({ _tag: "AssistantDelta", kind: "thinking", delta: streamEvent.delta });
+      break;
+    }
+    case "message_end": {
+      const role = messageRole(event.message);
+      if (role === "user") {
+        const text = userText(event.message as Message);
+        if (text.trim()) emit({ _tag: "UserMessage", text });
+      } else if (role === "assistant") {
+        emit({ _tag: "AssistantMessage", parts: assistantParts(event.message as AssistantMessage) });
+      }
+      // toolResult messages are covered by tool_execution_end.
+      break;
+    }
+    case "tool_execution_start":
+      emit({ _tag: "ToolStart", toolId: event.toolCallId, name: event.toolName, argsPreview: safeJson(event.args) });
+      break;
+    case "tool_execution_update":
+      emit({ _tag: "ToolUpdate", toolId: event.toolCallId, outputPreview: toolPreview(event.partialResult) });
+      break;
+    case "tool_execution_end":
+      emit({ _tag: "ToolEnd", toolId: event.toolCallId, name: event.toolName, isError: event.isError, outputPreview: toolPreview(event.result) });
+      break;
+    case "queue_update":
+      emit({
+        _tag: "QueueChanged",
+        queued: [
+          ...(event.steering as string[]).map((text) => ({ text, kind: "steer" as const })),
+          ...(event.followUp as string[]).map((text) => ({ text, kind: "follow-up" as const })),
+        ],
+      });
+      break;
+  }
+}
+
+/** Settle one run from its own messages; an earlier run's answer never counts. */
+export function settledOutcome(
+  messages: ReadonlyArray<unknown>,
+  fromIndex: number,
+  runError: string | undefined,
+): Extract<SubagentEvent, { _tag: "RunSettled" }>["outcome"] {
+  const last = lastAssistantMessage(messages, fromIndex);
+  const partialText = finalOutput(messages, fromIndex) || undefined;
+  if (last?.stopReason === "aborted") return { _tag: "Interrupted", partialText };
+  const errorText = runError ?? (last?.stopReason === "error" ? (last.errorMessage ?? "Run failed") : undefined);
+  if (errorText !== undefined) return { _tag: "Failed", errorText: boundedError(errorText), partialText };
+  return { _tag: "Completed", finalText: finalOutput(messages, fromIndex) };
+}
+
+export function boundedError(error: unknown) {
   return (error instanceof Error ? error.message : String(error)).slice(
     0,
     4096,
@@ -379,7 +457,10 @@ const makePiSession = (
         const { loader, settingsManager } = await createChildResources({
           cwd: task.cwd,
           projectTrusted: task.parent.projectTrusted,
-          extensionFactories: [capabilityGuardExtension(task.capability)],
+          extensionFactories: [capabilityGuardExtension(task.capability, task.childOptions?.tools)],
+          noSkills: task.childOptions?.skills === false,
+          noContextFiles: task.childOptions?.contextFiles === false,
+          noExtensions: task.childOptions?.extensions === false,
         });
         const sessionManager = task.resumeSessionFile
           ? SessionManager.open(task.resumeSessionFile, undefined, task.cwd)
@@ -409,7 +490,7 @@ const makePiSession = (
         // the scope finalizer that owns cleanup is only registered later.
         try {
           await session.bindExtensions({ mode: "print" });
-          restrictActiveTools(session, task.capability);
+          restrictActiveTools(session, task.capability, task.childOptions?.tools);
         } catch (error) {
           await shutdownAndDisposeChildSession(session);
           throw error;
@@ -441,7 +522,7 @@ const makePiSession = (
 
     const activeModel = (): Model<any> | undefined => {
       const sessionModel = session.model;
-      const last = lastAssistantMessage(session);
+      const last = lastAssistantMessage(session.messages);
       if (!last) return sessionModel;
       if (
         sessionModel &&
@@ -488,37 +569,7 @@ const makePiSession = (
     const settle = () => {
       if (state.settled) return;
       state.settled = true;
-      // Only this run's messages count; an earlier answer must never become
-      // the output of a later run that failed before responding.
-      const last = lastAssistantMessage(session, state.runStartIndex);
-      const partialText = finalOutput(session, state.runStartIndex) || undefined;
-      if (last?.stopReason === "aborted") {
-        emit({
-          _tag: "RunSettled",
-          outcome: { _tag: "Interrupted", partialText },
-        });
-        return;
-      }
-      const errorText =
-        state.runError ??
-        (last?.stopReason === "error"
-          ? (last.errorMessage ?? "Run failed")
-          : undefined);
-      if (errorText !== undefined) {
-        emit({
-          _tag: "RunSettled",
-          outcome: {
-            _tag: "Failed",
-            errorText: boundedError(errorText),
-            partialText,
-          },
-        });
-        return;
-      }
-      emit({
-        _tag: "RunSettled",
-        outcome: { _tag: "Completed", finalText: finalOutput(session, state.runStartIndex) },
-      });
+      emit({ _tag: "RunSettled", outcome: settledOutcome(session.messages, state.runStartIndex, state.runError) });
     };
 
     const handleEvent = (event: AgentSessionEvent) => {
@@ -526,82 +577,24 @@ const makePiSession = (
       switch (event.type) {
         case "agent_start":
           // Extensions may register tools between runs; guard new ones too.
-          restrictActiveTools(session, task.capability);
+          restrictActiveTools(session, task.capability, task.childOptions?.tools);
           toolTimeout.apply(session);
           state.settled = false;
           emit({ _tag: "RunStarted" });
           break;
-        case "message_update": {
-          const streamEvent = event.assistantMessageEvent;
-          if (streamEvent.type === "text_delta") {
-            emit({
-              _tag: "AssistantDelta",
-              kind: "text",
-              delta: streamEvent.delta,
-            });
-          } else if (streamEvent.type === "thinking_delta") {
-            emit({
-              _tag: "AssistantDelta",
-              kind: "thinking",
-              delta: streamEvent.delta,
-            });
-          }
-          break;
-        }
-        case "message_end": {
-          const role = messageRole(event.message);
-          if (role === "user") {
-            const text = userText(event.message as Message);
-            if (text.trim()) emit({ _tag: "UserMessage", text });
-          } else if (role === "assistant") {
-            emit({
-              _tag: "AssistantMessage",
-              parts: assistantParts(event.message as AssistantMessage),
-            });
+        case "message_end":
+          translateSessionEvent(event, emit);
+          if (messageRole(event.message) === "assistant") {
             emitUsage();
             emit({ _tag: "MetaChanged", meta: currentMeta() });
           }
-          // toolResult messages are covered by tool_execution_end.
           break;
-        }
+        case "message_update":
         case "tool_execution_start":
-          emit({
-            _tag: "ToolStart",
-            toolId: event.toolCallId,
-            name: event.toolName,
-            argsPreview: safeJson(event.args),
-          });
-          break;
         case "tool_execution_update":
-          emit({
-            _tag: "ToolUpdate",
-            toolId: event.toolCallId,
-            outputPreview: toolPreview(event.partialResult),
-          });
-          break;
         case "tool_execution_end":
-          emit({
-            _tag: "ToolEnd",
-            toolId: event.toolCallId,
-            name: event.toolName,
-            isError: event.isError,
-            outputPreview: toolPreview(event.result),
-          });
-          break;
         case "queue_update":
-          emit({
-            _tag: "QueueChanged",
-            queued: [
-              ...event.steering.map((text) => ({
-                text,
-                kind: "steer" as const,
-              })),
-              ...event.followUp.map((text) => ({
-                text,
-                kind: "follow-up" as const,
-              })),
-            ],
-          });
+          translateSessionEvent(event, emit);
           break;
         case "agent_settled":
           settle();
@@ -696,5 +689,6 @@ export const piBackend: SubagentBackend = {
   capabilities: { steering: true, modelSelection: true, reasoningEffort: true },
   // In-process SDK: always available.
   available: Effect.succeed(true),
-  spawn: makePiSession,
+  // Profiles choose the runtime; "process" runs the child as its own Pi process.
+  spawn: (task) => (task.childOptions?.runtime === "process" ? makeProcessSession(task) : makePiSession(task)),
 };

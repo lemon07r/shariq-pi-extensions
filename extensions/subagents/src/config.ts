@@ -6,9 +6,11 @@ import type { ReasoningEffort } from "./domain.ts";
 export const AGENT_TYPES = ["general-purpose", "explore", "plan"] as const;
 export const CAPABILITY_MODES = ["read-only", "read-write", "execute", "all"] as const;
 export const ISOLATION_MODES = ["none", "worktree"] as const;
+export const RUNTIME_MODES = ["in-process", "process"] as const;
 
 export type CapabilityMode = (typeof CAPABILITY_MODES)[number];
 export type IsolationMode = (typeof ISOLATION_MODES)[number];
+export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
 export interface AgentProfile {
   description?: string;
@@ -17,6 +19,23 @@ export interface AgentProfile {
   model?: string;
   thinking?: ReasoningEffort;
   isolation?: IsolationMode;
+  /** "process" runs the child as a separate `pi --mode rpc` process with Pi's built-in extensions. */
+  runtime?: RuntimeMode;
+  /** Exact tool allowlist, applied on top of the capability. */
+  tools?: string[];
+  /** Set false to start the child without skills, AGENTS.md files, or extensions. */
+  skills?: boolean;
+  contextFiles?: boolean;
+  extensions?: boolean;
+}
+
+/** Child session options resolved from a profile; none of them reach the model. */
+export interface ChildSessionOptions {
+  runtime: RuntimeMode;
+  tools?: readonly string[];
+  skills: boolean;
+  contextFiles: boolean;
+  extensions: boolean;
 }
 
 export interface PersonaProfile {
@@ -93,13 +112,27 @@ function parseProfile(value: unknown): AgentProfile | undefined {
   if (thinking) profile.thinking = thinking;
   const isolation = enumValue(value.isolation, ISOLATION_MODES);
   if (isolation) profile.isolation = isolation;
+  const runtime = enumValue(value.runtime, RUNTIME_MODES);
+  if (runtime) profile.runtime = runtime;
+  if (Array.isArray(value.tools) && value.tools.every((name) => typeof name === "string" && name.trim())) {
+    profile.tools = value.tools.map((name) => (name as string).trim());
+  }
+  for (const key of ["skills", "contextFiles", "extensions"] as const) {
+    if (typeof value[key] === "boolean") profile[key] = value[key] as boolean;
+  }
   return profile;
 }
 
 function parsePersona(value: unknown): PersonaProfile | undefined {
   const profile = parseProfile(value);
   if (!profile?.instructions) return undefined;
-  return { ...profile, instructions: profile.instructions };
+  return {
+    description: profile.description,
+    instructions: profile.instructions,
+    model: profile.model,
+    thinking: profile.thinking,
+    isolation: profile.isolation,
+  };
 }
 
 function mergeConfig(base: SubagentConfig, raw: Record<string, unknown> | undefined): SubagentConfig {
@@ -167,6 +200,19 @@ function validateProfileDocument(name: string, value: unknown, persona: boolean)
     !enumValue(value.thinking, ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)
   ) {
     throw new Error(`${name}.thinking is invalid.`);
+  }
+  if (persona) return;
+  if (value.runtime !== undefined && !enumValue(value.runtime, RUNTIME_MODES)) {
+    throw new Error(`${name}.runtime must be one of ${RUNTIME_MODES.join(", ")}.`);
+  }
+  if (
+    value.tools !== undefined &&
+    (!Array.isArray(value.tools) || value.tools.length === 0 || !value.tools.every((tool) => typeof tool === "string" && tool.trim()))
+  ) {
+    throw new Error(`${name}.tools must be a non-empty array of tool names.`);
+  }
+  for (const key of ["skills", "contextFiles", "extensions"]) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") throw new Error(`${name}.${key} must be true or false.`);
   }
 }
 
@@ -242,5 +288,12 @@ export function resolveProfile(
     model: options.model ?? profile.model ?? persona?.model,
     thinking: options.thinking ?? profile.thinking ?? persona?.thinking,
     isolation: options.isolation ?? profile.isolation ?? persona?.isolation ?? "none",
+    childOptions: {
+      runtime: profile.runtime ?? "in-process",
+      tools: profile.tools,
+      skills: profile.skills ?? true,
+      contextFiles: profile.contextFiles ?? true,
+      extensions: profile.extensions ?? true,
+    } satisfies ChildSessionOptions,
   } as const;
 }

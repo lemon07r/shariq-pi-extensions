@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTaskPrompt, forkConversation, parseForkTurns } from "./src/context.ts";
 import { loadConfigDocument, loadSubagentConfig, resolveProfile, saveConfigDocument, type SubagentConfig } from "./src/config.ts";
 import { SUBAGENT_SPAWN_PROMPT_GUIDELINES, WORKTREE_ISOLATION_DESCRIPTION } from "./src/prompt.ts";
 import { allocateSubagentId } from "./src/catalog.ts";
-import { capabilityGuardExtension, filterToolsForCapability } from "./src/backends/pi.ts";
+import { capabilityGuardExtension, childToolAllowed, filterToolsForCapability } from "./src/backends/pi.ts";
+import { childArgs, piCommand } from "./src/backends/pi-process.ts";
 
 const usage = {
   input: 0,
@@ -162,6 +163,7 @@ test("profile resolution applies explicit overrides before profile and persona d
     model: "explicit-model",
     thinking: undefined,
     isolation: "worktree",
+    childOptions: { runtime: "in-process", tools: undefined, skills: true, contextFiles: true, extensions: true },
   });
 });
 
@@ -172,11 +174,72 @@ test("restrictive children block unclassified tools at call time, including late
   assert.equal(guard({ toolName: "read" }), undefined);
   assert.deepEqual(guard({ toolName: "late_extension_tool" }), {
     block: true,
-    reason: 'Tool "late_extension_tool" is not permitted for a read-only subagent.',
+    reason: 'Tool "late_extension_tool" is not permitted for this subagent.',
   });
   assert.equal(guard({ toolName: "bash" }).block, true);
+  // codemode is allowed; the tools a script calls are checked one by one.
+  assert.equal(guard({ toolName: "codemode" }), undefined);
 
   const unrestricted = new Map<string, unknown>();
   capabilityGuardExtension("all")({ on: (name: string, handler: unknown) => unrestricted.set(name, handler) } as never);
   assert.equal(unrestricted.size, 0);
+});
+
+test("profiles carry runtime, tool allowlist, and resource switches without touching personas", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-subagent-config-test-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-subagent-agent-dir-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    saveConfigDocument("global", cwd, JSON.stringify({
+      profiles: { reviewer: { capability: "execute", runtime: "process", tools: ["read", "bash"], skills: false, contextFiles: false } },
+    }));
+    assert.throws(() => saveConfigDocument("global", cwd, '{"profiles":{"bad":{"runtime":"vm"}}}'), /runtime must be one of/);
+    assert.throws(() => saveConfigDocument("global", cwd, '{"profiles":{"bad":{"tools":[]}}}'), /non-empty array/);
+    const profile = resolveProfile(loadSubagentConfig(cwd, false), { agentType: "reviewer" });
+    assert.deepEqual(profile.childOptions, { runtime: "process", tools: ["read", "bash"], skills: false, contextFiles: false, extensions: true });
+    assert.deepEqual(resolveProfile(loadSubagentConfig(cwd, false), {}).childOptions, { runtime: "in-process", tools: undefined, skills: true, contextFiles: true, extensions: true });
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("an exact tool allowlist narrows the capability at call time", () => {
+  assert.equal(childToolAllowed("read", "execute", ["read", "bash"]), true);
+  assert.equal(childToolAllowed("bash", "execute", ["read", "bash"]), true);
+  assert.equal(childToolAllowed("grep", "execute", ["read", "bash"]), false, "not in the allowlist");
+  assert.equal(childToolAllowed("bash", "read-only", ["read", "bash"]), false, "the capability still applies");
+  const handlers = new Map<string, (event: any) => any>();
+  capabilityGuardExtension("all", ["read"])({ on: (name: string, handler: any) => handlers.set(name, handler) } as never);
+  assert.equal(handlers.get("tool_call")!({ toolName: "write" }).block, true);
+});
+
+test("process children start the same Pi build with the profile's switches and the bridge", () => {
+  const task = {
+    capability: "read-only",
+    reasoningEffort: "low",
+    childOptions: { runtime: "process", skills: false, contextFiles: false, extensions: false },
+    parent: { projectTrusted: false },
+  } as never;
+  const args = childArgs(task, { provider: "prov", id: "model-1" } as never, "/tmp/child.jsonl");
+  assert.deepEqual(args.slice(0, 11), ["--mode", "rpc", "--session", "/tmp/child.jsonl", "--provider", "prov", "--model", "model-1", "--thinking", "low", "--no-approve"]);
+  assert.ok(args.includes("--no-skills") && args.includes("--no-context-files") && args.includes("--no-extensions"));
+  assert.match(args.at(-1)!, /child-bridge\.ts$/);
+  assert.ok(!args.includes("--tools"), "the bridge filters tools so defaultTools such as codemode still apply");
+});
+
+test("process children run the same Pi entry script, following a pi symlink", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-cli-"));
+  try {
+    const cli = join(dir, "cli.js");
+    writeFileSync(cli, "#!/usr/bin/env node\n");
+    symlinkSync(cli, join(dir, "pi"));
+    assert.deepEqual(piCommand(["/usr/bin/node", join(dir, "pi")], process.execPath), { file: process.execPath, args: [realpathSync(cli)] });
+    assert.deepEqual(piCommand([process.execPath], process.execPath), { file: process.execPath, args: [] }, "a compiled binary runs itself");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
