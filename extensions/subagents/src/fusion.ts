@@ -70,7 +70,7 @@ export const FUSION_PROFILES: Record<string, AgentProfile> = {
 
 /** Replaces the default "delegate only when asked" rule while Fusion mode is on. */
 export const FUSION_LEAD_GUIDELINE =
-  "Fusion mode is on, so delegate without being asked. You are the lead: keep intent, planning, architecture, root-cause judgment, security, integration, and final review; hand decided, bounded work to the sidekick, explore, reviewer, worker, and verifier profiles, and do trivial or judgment-heavy work yourself. Read the fusion skill before splitting multi-step work. Unless fork_turns is set, write a message that stands on its own: the goal, relevant paths, allowed scope, and the report you expect.";
+  "Fusion mode is on, so delegate without being asked. You are the lead: keep intent, planning, architecture, root-cause judgment, security, integration, and final review. Once an approach is settled and the build is self-contained (new files, a feature, or a multi-file change of more than about ten edits), hand it to the sidekick and review its diff; keep the main thread of live debugging and small fixes yourself. Route other bounded work to explore, reviewer, worker, and verifier as the fusion skill describes. Read the fusion skill before splitting multi-step work. Unless fork_turns is set, write a message that stands on its own: the goal, relevant paths, allowed scope, and the report you expect.";
 
 const FUSION_SKILL_DIR = fileURLToPath(new URL("../../../skills/fusion", import.meta.url));
 
