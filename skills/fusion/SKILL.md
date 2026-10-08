@@ -18,9 +18,9 @@ You are the lead, on whichever model the user picked for this session; the heavy
 - **`reviewer` (medium):** one fresh review of the final diff of a non-trivial change.
 - **`worker` (light):** mechanical edits, renames, boilerplate, docs, and narrow tests that are fully specified.
 - **`verifier` (light):** builds, tests, linters, and reproductions. It reports failures and does not fix them.
+- **`general-purpose` (heavy):** rare; for hard, decided work after the sidekick hits a concrete blocker.
 
 Light output is only as good as your check of it, so give light profiles work whose result is cheap to check, such as an edit that applies or a command that passes, and not analysis, diagnosis, or summaries you would pass on unchecked.
-- **`general-purpose` (heavy):** rare; for hard, decided work after the sidekick hits a concrete blocker.
 
 ## Write the message
 
