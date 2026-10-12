@@ -310,6 +310,12 @@ export default function (pi: ExtensionAPI) {
         unsubStatus?.();
         unsubStatus = manager.view.subscribe(() => updateStatus(manager));
         updateStatus(manager);
+        // Smart Compaction lists children that have not reported back in its checkpoint.
+        (globalThis as any).__pi_get_running_subagents = () =>
+          manager.view
+            .list()
+            .filter((snap) => snap.status === "running")
+            .map((snap) => `${snap.id}: "${oneLine(snap.title)}" (${snap.meta.agentType ?? snap.backend})`);
         return manager;
       });
     return managerPromise;
@@ -680,6 +686,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     unsubscribeCoordinator();
+    delete (globalThis as any).__pi_get_running_subagents;
     for (const pending of pendingQuestions.values()) {
       pending.reject(new Error("Parent Pi session shut down before replying."));
     }

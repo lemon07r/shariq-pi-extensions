@@ -41,6 +41,7 @@ import {
   escapeXml,
   extractProtectedFacts,
   formatFileOperationsXml,
+  RUNNING_SUBAGENTS_NOTE,
   sanitizeTagContent,
   serializeConversationForCompaction,
   truncateHeadAndTail,
@@ -195,15 +196,17 @@ describe("smart-compaction prompt, sanitization, and XML escaping", () => {
   it("formats touched, read, dirty files, lockfiles, and bounded patches into XML blocks", () => {
     const xml = formatFileOperationsXml({
       readFiles: ["src/index.ts", "README.md"],
-      touchedModifiedFiles: ["src/index.ts", "src/out.ts"],
+      touchedModifiedFiles: ["src/out.ts", "src/index.ts"],
       activeDirtyFiles: ["src/out.ts"],
       dirtyPatch: `diff --git a/src/out.ts b/src/out.ts\n+const unsafe = "<value>";`,
       dirtyStateAvailable: true,
       activeBackgroundProcesses: ["term-1: npm run dev (pid 1234)"],
+      runningSubagents: ['sa-1: "audit" (explore)'],
       lockfilesAndGeneratedAssets: ["package-lock.json"],
     });
     assert.match(xml, /<read-files>\nREADME\.md\n<\/read-files>/);
-    assert.match(xml, /<touched-files>\nsrc\/index\.ts\nsrc\/out\.ts\n<\/touched-files>/);
+    assert.match(xml, /<touched-files>\nsrc\/out\.ts\nsrc\/index\.ts\n<\/touched-files>/, "recency order is kept");
+    assert.ok(xml.includes(`<running-subagents>\n${RUNNING_SUBAGENTS_NOTE}\nsa-1: &quot;audit&quot; (explore)\n</running-subagents>`));
     assert.match(xml, /<uncommitted-dirty-files>\nsrc\/out\.ts\n<\/uncommitted-dirty-files>/);
     assert.match(xml, /<modified-lockfiles-and-assets>\npackage-lock\.json\n<\/modified-lockfiles-and-assets>/);
     assert.match(xml, /<active-background-processes>\nterm-1: npm run dev \(pid 1234\)\n<\/active-background-processes>/);
@@ -515,6 +518,8 @@ describe("smart-compaction 10-cycle dynamic retention test", () => {
             promptText.includes(CANARY_CONSTRAINT),
             "Submitted context to LLM did not contain previous canary constraint!",
           );
+          const previous = promptText.slice(promptText.indexOf("<previous-summary>"), promptText.indexOf("</previous-summary>"));
+          assert.ok(!previous.includes("<touched-files>"), "appended state is regenerated, not fed back");
         }
 
         const dynamicSummary = `## 1. Primary Goal & Nuanced Intent
@@ -619,10 +624,11 @@ describe("smart-compaction 10-cycle dynamic retention test", () => {
 
     const lastCompaction = branchEntries[branchEntries.length - 1];
     assert.equal(lastCompaction.details.cycleCount, 10);
-    assert.equal(lastCompaction.details.touchedModifiedFiles.length, 10);
-    for (let i = 1; i <= 10; i++) {
-      assert.ok(lastCompaction.details.touchedModifiedFiles.includes(`src/module_${i}.ts`));
-    }
+    assert.deepEqual(
+      lastCompaction.details.touchedModifiedFiles,
+      Array.from({ length: 10 }, (_, i) => `src/module_${i + 1}.ts`),
+      "carried file lists keep least-to-most recent order",
+    );
   });
 });
 

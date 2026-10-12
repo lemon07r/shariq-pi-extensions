@@ -8,18 +8,19 @@ The summarizer must return six numbered sections:
 
 1. Primary goal and nuanced intent, including user constraints and negative rules.
 2. Progress ledger: done, in progress (with batch counts), and blocked. Done items are closed history the next turn must not redo.
-3. Code changes and in-progress snippets.
+3. Code changes, with short snippets of the key changed lines of uncommitted work.
 4. Errors, root causes, and fixes.
 5. Key decisions and hypotheses.
 6. Resume anchor and the single next action.
 
-On a later compaction the previous checkpoint is merged with the new turns instead of being summarized again from scratch.
+The summarizer aims for about 1,500 words. On a later compaction the previous checkpoint is merged with the new turns at about its previous length, condensing the oldest finished work first. Only its model-written sections are sent back; the computed sections below are regenerated each time.
 
 After the model's text, the extension appends sections it computes itself:
 
-- files read and files written or edited, accumulated across compactions;
+- files read and files written or edited, accumulated across compactions in recency order and capped at the 40 most recently read and 60 most recently changed;
 - uncommitted files from `git status`, with lockfiles, minified bundles, and build output listed separately and kept out of the diff;
 - running background terminals, so the next turn does not start a duplicate server;
+- background subagents that have not reported back, with a note not to poll, relaunch, or duplicate them;
 - a bounded uncommitted diff (16,000 characters, shared across files) with previews of untracked files, or a marker when worktree state is unavailable.
 
 ## Validation and retries

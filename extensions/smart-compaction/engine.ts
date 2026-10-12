@@ -11,6 +11,7 @@ import {
   extractProtectedFacts,
   formatFileOperationsXml,
   sanitizeTagContent,
+  semanticSummary,
   SMART_COMPACTION_INITIAL_PROMPT,
   SMART_COMPACTION_SYSTEM_PROMPT,
   SMART_COMPACTION_UPDATE_PROMPT,
@@ -45,6 +46,7 @@ export interface SmartCompactionDetails {
   activeDirtyPatch: string;
   dirtyStateAvailable: boolean;
   activeBackgroundProcesses?: string[];
+  runningSubagents?: string[];
   lockfilesAndGeneratedAssets?: string[];
   cycleCount: number;
   sourceCharacters: number;
@@ -98,6 +100,34 @@ export function resolveCompactionModel(
   throw new Error(`Configured compaction model "${trimmed}" was not found in model registry.`);
 }
 
+// The file lists carry over across compactions; keep only the most recently used paths so they stay bounded.
+export const MAX_READ_FILES = 40;
+export const MAX_MODIFIED_FILES = 60;
+
+/** Moves a path to the most-recent end of an insertion-ordered set. */
+function touchPath(paths: Set<string>, file: string): void {
+  paths.delete(file);
+  paths.add(file);
+}
+
+/**
+ * Carried and current file activity, least to most recently used, capped to the newest paths.
+ * Pi reports the current window's files in first-use order, after every carried path.
+ */
+export function accumulateFileLists(
+  prior: { touchedReadFiles: Iterable<string>; touchedModifiedFiles: Iterable<string> },
+  current?: { read?: Iterable<string>; written?: Iterable<string>; edited?: Iterable<string> },
+): { readFiles: string[]; touchedModifiedFiles: string[] } {
+  const modified = new Set(prior.touchedModifiedFiles);
+  for (const file of [...(current?.written ?? []), ...(current?.edited ?? [])]) touchPath(modified, file);
+  const read = new Set(prior.touchedReadFiles);
+  for (const file of current?.read ?? []) touchPath(read, file);
+  return {
+    readFiles: [...read].filter((file) => !modified.has(file)).slice(-MAX_READ_FILES),
+    touchedModifiedFiles: [...modified].slice(-MAX_MODIFIED_FILES),
+  };
+}
+
 export function extractPriorFileState(branchEntries?: any[]): {
   touchedReadFiles: Set<string>;
   touchedModifiedFiles: Set<string>;
@@ -109,8 +139,8 @@ export function extractPriorFileState(branchEntries?: any[]): {
 
   if (!Array.isArray(branchEntries)) return { touchedReadFiles, touchedModifiedFiles, cycleCount };
 
-  for (let i = branchEntries.length - 1; i >= 0; i--) {
-    const entry = branchEntries[i];
+  // Oldest to newest, so paths from later checkpoints end up at the most-recent end.
+  for (const entry of branchEntries) {
     if (entry?.type === "compaction" && entry.details) {
       const details = entry.details as Partial<SmartCompactionDetails> & {
         readFiles?: string[];
@@ -120,11 +150,11 @@ export function extractPriorFileState(branchEntries?: any[]): {
       };
       const readList = details.touchedReadFiles ?? details.readFiles;
       if (Array.isArray(readList)) {
-        for (const file of readList) touchedReadFiles.add(file);
+        for (const file of readList) touchPath(touchedReadFiles, file);
       }
       const modifiedList = details.touchedModifiedFiles ?? details.modifiedFiles;
       if (Array.isArray(modifiedList)) {
-        for (const file of modifiedList) touchedModifiedFiles.add(file);
+        for (const file of modifiedList) touchPath(touchedModifiedFiles, file);
       }
       if (typeof details.cycleCount === "number") {
         cycleCount = Math.max(cycleCount, details.cycleCount);
@@ -156,9 +186,10 @@ export function isGeneratedOrLockfile(filePath: string): boolean {
   return GENERATED_OR_LOCKFILE_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-export function getActiveBackgroundProcesses(): string[] {
+/** Lines published by another extension through a global getter; best-effort, empty when absent. */
+function publishedLines(name: string): string[] {
   try {
-    const fn = (globalThis as any).__pi_get_active_terminals;
+    const fn = (globalThis as any)[name];
     if (typeof fn === "function") {
       const active = fn();
       if (Array.isArray(active)) {
@@ -169,6 +200,15 @@ export function getActiveBackgroundProcesses(): string[] {
     // Best-effort inspection.
   }
   return [];
+}
+
+export function getActiveBackgroundProcesses(): string[] {
+  return publishedLines("__pi_get_active_terminals");
+}
+
+/** Background subagents that have not reported back, published by the Subagents extension. */
+export function getRunningSubagents(): string[] {
+  return publishedLines("__pi_get_running_subagents");
 }
 
 const execFileAsync = promisify(execFile);
@@ -535,7 +575,7 @@ export async function runSmartCompaction(
 
   let promptContent = `<conversation>\n${conversationText}\n</conversation>\n\n`;
   if (previousSummary) {
-    promptContent += `<previous-summary>\n${sanitizeTagContent(previousSummary)}\n</previous-summary>\n\n`;
+    promptContent += `<previous-summary>\n${sanitizeTagContent(semanticSummary(previousSummary))}\n</previous-summary>\n\n`;
   }
   if (protectedFacts.length > 0) {
     promptContent += `<protected-facts>\n${protectedFacts.map(sanitizeTagContent).join("\n")}\n</protected-facts>\n\n`;
@@ -689,24 +729,14 @@ export async function runSmartCompaction(
 
   // Deterministic file operation accumulation across cycles
   const prior = extractPriorFileState(branchEntries);
-  const currentOps = preparation.fileOps;
-
-  const combinedModified = new Set([
-    ...prior.touchedModifiedFiles,
-    ...(currentOps?.written ?? []),
-    ...(currentOps?.edited ?? []),
-  ]);
-
-  const combinedRead = new Set([
-    ...prior.touchedReadFiles,
-    ...(currentOps?.read ?? []),
-  ]);
-
-  const readFilesList = [...combinedRead].filter((file) => !combinedModified.has(file)).sort();
-  const touchedModifiedFilesList = [...combinedModified].sort();
+  const { readFiles: readFilesList, touchedModifiedFiles: touchedModifiedFilesList } = accumulateFileLists(
+    prior,
+    preparation.fileOps,
+  );
   const gitState = await getGitEngineeringState(ctx.cwd, signal);
   const activeDirtyFilesList = gitState.files.map((file) => file.path);
   const activeBackgroundProcesses = getActiveBackgroundProcesses();
+  const runningSubagents = getRunningSubagents();
 
   const fileOpsXml = formatFileOperationsXml({
     readFiles: readFilesList,
@@ -715,6 +745,7 @@ export async function runSmartCompaction(
     dirtyPatch: gitState.patch,
     dirtyStateAvailable: gitState.available,
     activeBackgroundProcesses,
+    runningSubagents,
     lockfilesAndGeneratedAssets: gitState.lockfilesAndGeneratedAssets,
   });
 
@@ -734,6 +765,7 @@ export async function runSmartCompaction(
     activeDirtyPatch: gitState.patch,
     dirtyStateAvailable: gitState.available,
     activeBackgroundProcesses: activeBackgroundProcesses.length > 0 ? activeBackgroundProcesses : undefined,
+    runningSubagents: runningSubagents.length > 0 ? runningSubagents : undefined,
     lockfilesAndGeneratedAssets: gitState.lockfilesAndGeneratedAssets.length > 0 ? gitState.lockfilesAndGeneratedAssets : undefined,
     cycleCount,
     sourceCharacters,
