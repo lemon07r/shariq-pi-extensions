@@ -93,7 +93,8 @@ export function createInputModeExtension(options: InputModeExtensionOptions = {}
     pi.on("agent_settled", () => {
       if (pendingInterrupts.length === 0) return;
       const input = mergeInputs(pendingInterrupts.splice(0));
-      pi.sendUserMessage(input, { expandPromptTemplates: true });
+      // Another settled action may start a run first; the interrupting input then steers it.
+      pi.sendUserMessage(input, { deliverAs: "steer", expandPromptTemplates: true });
     });
 
     pi.on("session_shutdown", () => {

@@ -66,7 +66,7 @@ test("steer, interrupt, and follow-up modes preserve distinct input semantics", 
     app.hooks.get("agent_settled")?.();
     assert.deepEqual(app.sent, [{
       content: "new direction",
-      options: { expandPromptTemplates: true },
+      options: { deliverAs: "steer", expandPromptTemplates: true },
     }]);
 
     const image = { type: "image", data: "fixture", mimeType: "image/png" };
@@ -80,7 +80,7 @@ test("steer, interrupt, and follow-up modes preserve distinct input semantics", 
         { type: "text", text: "\n\n---\n\n" },
         { type: "text", text: "second" },
       ],
-      options: { expandPromptTemplates: true },
+      options: { deliverAs: "steer", expandPromptTemplates: true },
     });
 
     await app.commands.get("input-mode").handler("follow-up", commandContext);
